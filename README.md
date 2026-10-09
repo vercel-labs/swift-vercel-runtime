@@ -320,10 +320,12 @@ See `Sources/VercelHummingbird` for a complete adapter in about 60 lines.
 ```sh
 swift test                  # unit tests
 scripts/test-linux.sh       # build every example with the plugin and run the contract
-                            # tests against the Linux binary in amazonlinux:2023 (Docker)
+                            # tests against the Linux binary
 ```
 
-CI runs both on Linux (`.github/workflows/ci.yml`).
+The binaries are fully static, so on Linux `test-linux.sh` runs them directly; on macOS it runs
+them in an `amazonlinux:2023` container (Docker). CI runs both commands on a Linux arm64 runner
+(`.github/workflows/ci.yml`).
 
 `scripts/fake-runtime.py` emulates Vercel's runtime: it spawns the binary the same way, decodes
 messages with the same strict schema, sends `approaching-timeout`, and checks ping handling,

@@ -1,9 +1,14 @@
 #!/usr/bin/env bash
 # Builds an example with the vercel-build plugin and runs the IPC contract harness against the
-# real Linux binary inside Amazon Linux 2023 (the provided.al2023 base OS).
+# real Linux binary.
 #
-# Usage: scripts/test-linux.sh [Examples/Vapor|Examples/Hummingbird ...]   (default: all examples)
-# Env:   ARCHITECTURE (arm64|x86_64), SKIP_BUILD=1 to reuse .vercel/output.
+# The binary is fully static, so on a Linux host of the same architecture (CI) the harness runs it
+# directly. Elsewhere (macOS, or another architecture) it runs inside Amazon Linux 2023, the
+# provided.al2023 base OS, with Docker.
+#
+# Usage: scripts/test-linux.sh [Examples/HelloVapor ...]   (default: all examples)
+# Env:   ARCHITECTURE (arm64|x86_64), SKIP_BUILD=1 to reuse .vercel/output,
+#        HARNESS (native|docker) to override where the binary runs.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -11,10 +16,23 @@ ROOT="$PWD"
 
 ARCHITECTURE="${ARCHITECTURE:-arm64}"
 case "$ARCHITECTURE" in
-  arm64) PLATFORM="linux/arm64" ;;
-  x86_64) PLATFORM="linux/amd64" ;;
+  arm64) PLATFORM="linux/arm64"; MACHINE="aarch64" ;;
+  x86_64) PLATFORM="linux/amd64"; MACHINE="x86_64" ;;
   *) echo "error: unsupported ARCHITECTURE '$ARCHITECTURE'" >&2; exit 1 ;;
 esac
+
+if [ -z "${HARNESS:-}" ]; then
+  if [ "$(uname -s)" = "Linux" ] && [ "$(uname -m)" = "$MACHINE" ]; then
+    HARNESS="native"
+  else
+    HARNESS="docker"
+  fi
+fi
+case "$HARNESS" in
+  native | docker) ;;
+  *) echo "error: HARNESS must be native or docker, got '$HARNESS'" >&2; exit 1 ;;
+esac
+echo "Running binaries: $HARNESS"
 
 if [ "$#" -eq 0 ]; then
   set -- Examples/*/
@@ -53,10 +71,15 @@ EOF
   if grep -q 'VercelHummingbirdWebSocket' "$ROOT/$EXAMPLE/Package.swift"; then
     HARNESS_FLAGS="--websocket"
   fi
-  docker run --rm --platform "$PLATFORM" \
-    -e HARNESS_FLAGS="$HARNESS_FLAGS" \
-    -v "$ROOT/$EXAMPLE/.vercel/output/functions/index.func:/var/task:ro" \
-    -v "$ROOT/scripts/fake-runtime.py:/opt/fake-runtime.py:ro" \
-    amazonlinux:2023 \
-    sh -c 'command -v python3 >/dev/null || dnf install -y -q python3 >/dev/null; python3 /opt/fake-runtime.py $HARNESS_FLAGS /var/task/executable'
+  if [ "$HARNESS" = "native" ]; then
+    # shellcheck disable=SC2086
+    python3 scripts/fake-runtime.py $HARNESS_FLAGS "$ROOT/$EXAMPLE/.vercel/output/functions/index.func/executable"
+  else
+    docker run --rm --platform "$PLATFORM" \
+      -e HARNESS_FLAGS="$HARNESS_FLAGS" \
+      -v "$ROOT/$EXAMPLE/.vercel/output/functions/index.func:/var/task:ro" \
+      -v "$ROOT/scripts/fake-runtime.py:/opt/fake-runtime.py:ro" \
+      amazonlinux:2023 \
+      sh -c 'command -v python3 >/dev/null || dnf install -y -q python3 >/dev/null; python3 /opt/fake-runtime.py $HARNESS_FLAGS /var/task/executable'
+  fi
 done

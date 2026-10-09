@@ -13,31 +13,26 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-env:
-  STATIC_SDK_URL: https://download.swift.org/swift-6.4.0-release/static-sdk/swift-6.4.0-RELEASE/swift-6.4.0-RELEASE_static-linux-0.1.0.artifactbundle.tar.gz
-  STATIC_SDK_CHECKSUM: 47d2fd89eebfdf9eb4d536b6710414297f755c17926cdebc4742c08982b40a9e
-
 jobs:
-  unit-tests:
-    name: Unit tests (Linux)
+  test:
+    name: Test (Linux arm64)
     runs-on: ubuntu-24.04-arm
+    # The official image is only used for the Swift 6.4 toolchain. Everything runs directly in it.
     container: swift:6.4
+    env:
+      STATIC_SDK_URL: https://download.swift.org/swift-6.4.0-release/static-sdk/swift-6.4.0-RELEASE/swift-6.4.0-RELEASE_static-linux-0.1.0.artifactbundle.tar.gz
+      STATIC_SDK_CHECKSUM: 47d2fd89eebfdf9eb4d536b6710414297f755c17926cdebc4742c08982b40a9e
     steps:
       - uses: actions/checkout@v4
-      - run: swift test
 
-  contract-tests:
-    name: Contract tests (Static Linux SDK, Amazon Linux 2023)
-    runs-on: ubuntu-24.04-arm
-    steps:
-      - uses: actions/checkout@v4
-      - name: Build the examples with the vercel-build plugin
+      - name: Install the Static Linux SDK and Python (for the contract harness)
         run: |
-          docker run --rm -v "$PWD":/src -w /src -e STATIC_SDK_URL -e STATIC_SDK_CHECKSUM swift:6.4 bash -euo pipefail -c '
-            swift sdk install "$STATIC_SDK_URL" --checksum "$STATIC_SDK_CHECKSUM"
-            for example in Examples/*/; do
-              (cd "$example" && swift package --disable-sandbox vercel-build)
-            done
-          '
-      - name: Run the runtime contract tests against the binaries
-        run: SKIP_BUILD=1 ./scripts/test-linux.sh
+          apt-get update -qq && apt-get install -y -qq python3 > /dev/null
+          swift sdk install "$STATIC_SDK_URL" --checksum "$STATIC_SDK_CHECKSUM"
+
+      - name: Unit tests
+        run: swift test
+
+      - name: Build the examples with vercel-build and run the runtime contract tests
+        # The binaries are fully static, so they run directly on this Linux host.
+        run: ./scripts/test-linux.sh
