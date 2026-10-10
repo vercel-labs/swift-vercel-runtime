@@ -1,16 +1,35 @@
 import Logging
 import Vapor
-import VercelVapor
+import VercelRuntime
 
+// A regular Vapor 5 app: nothing here is required to run on Vercel. Vapor reads the PORT
+// environment variable, which the Vercel bootstrap sets.
+//
+// `VercelRuntime` is optional. It is used here for per-request logs, `waitUntil` and the request
+// helpers.
 @main
 struct App {
     static func main() async throws {
-        // Attributes logs to the request that produced them in Vercel's logs.
+        // Optional: groups logs by request in Vercel's logs (with the middleware below). Logs reach
+        // Vercel without it too. If you already call LoggingSystem.bootstrap, add VercelLogHandler
+        // there with MultiplexLogHandler instead.
         VercelLogHandler.bootstrap()
 
-        let app = try Application.vercel()
+        let app = try Application()
+        // Runs every route as part of its Vercel request (logs and waitUntil). See below.
+        app.middleware.use(VercelRequestMiddleware())
         try routes(app)
         try await app.start()
+    }
+}
+
+/// Runs each request inside `Vercel.withRequest`, so `VercelLogHandler` attributes its logs to it
+/// and `Vercel.waitUntil` keeps the function alive for its background work. Locally it does nothing.
+struct VercelRequestMiddleware: Middleware {
+    func respond(to request: Request, chainingTo next: any Responder) async throws -> Response {
+        try await Vercel.withRequest(request.headers) {
+            try await next.respond(to: request)
+        }
     }
 }
 
@@ -92,18 +111,20 @@ func routes(_ app: Application) throws {
         return "scheduled\n"
     }
 
-    // Scheduled from vercel.json. Requires `Authorization: Bearer $CRON_SECRET` when set.
-    app.grouped(VercelCronMiddleware()).get("cron") { _ in
+    // Scheduled from vercel.json. With CRON_SECRET set, Vercel's bootstrap rejects requests
+    // without `Authorization: Bearer $CRON_SECRET` before they get here.
+    app.get("cron") { _ in
         logger.info("cron job ran")
         return "cron ok\n"
     }
 
     app.get("geo") { req in
         let environment = VercelEnvironment.current
+        let vercel = req.headers.vercel
         return RequestDetails(
-            id: req.vercel.id,
-            ipAddress: req.vercel.ipAddress,
-            geolocation: req.vercel.geolocation,
+            id: vercel.id,
+            ipAddress: vercel.ipAddress,
+            geolocation: vercel.geolocation,
             environment: environment.target?.rawValue,
             region: environment.region
         )

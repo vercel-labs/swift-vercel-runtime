@@ -1,29 +1,36 @@
 import Foundation
 import Synchronization
 import Testing
+@testable import VercelBootstrapCore
 @testable import VercelRuntime
 
-/// The NIO-backed connection against a fake functions runtime on a real Unix socket.
+extension IPCConnection {
+    @discardableResult
+    func send(_ message: IPCMessage) -> Bool {
+        send(json: message.json, droppable: message.isDroppable)
+    }
+}
+
+/// The NIO-backed connection against a fake peer on a real Unix socket.
 @Suite(.serialized) struct IPCConnectionTests {
     @Test func sendsNulTerminatedFramesInOrder() async throws {
         let socket = try TestSocket()
-        let runtime = VercelRuntime(ipcPath: socket.path)
+        let connection = try IPCConnection(path: socket.path)
         try socket.accept()
 
-        runtime.serverStarted(httpPort: 3000)
-        runtime.requestEnded(InvocationContext(invocationID: "inv-1", requestID: 1))
+        connection.send(.serverStarted(initDuration: 12, httpPort: 3000))
+        connection.send(.end(InvocationContext(invocationID: "inv-1", requestID: 1)))
 
         let frames = try await socket.frames(2)
-        #expect(frames[0].hasPrefix(#"{"type":"server-started","payload":{"initDuration":"#))
-        #expect(frames[0].hasSuffix(#","httpPort":3000}}"#))
+        #expect(frames[0] == #"{"type":"server-started","payload":{"initDuration":12,"httpPort":3000}}"#)
         #expect(frames[1] == #"{"type":"end","payload":{"context":{"invocationId":"inv-1","requestId":1},"error":null}}"#)
     }
 
-    @Test func disabledWithoutIPCPath() {
-        #expect(!VercelRuntime(ipcPath: nil).isEnabled)
-        #expect(!VercelRuntime(ipcPath: "").isEnabled)
-        // A missing socket fails synchronously, logs, and disables instead of crashing.
-        #expect(!VercelRuntime(ipcPath: "/tmp/does-not-exist-\(getpid()).sock").isEnabled)
+    @Test func missingSocketFailsSynchronously() {
+        let path = "/tmp/does-not-exist-\(getpid()).sock"
+        #expect(throws: IPCConnection.Error.self) {
+            try IPCConnection(path: path)
+        }
     }
 
     @Test func rejectsOverlongPath() {
@@ -35,11 +42,11 @@ import Testing
 
     @Test func flushReturnsOnceBytesAreOnTheSocket() async throws {
         let socket = try TestSocket()
-        let runtime = VercelRuntime(ipcPath: socket.path)
+        let connection = try IPCConnection(path: socket.path)
         try socket.accept()
 
-        runtime.serverStarted(httpPort: 1234)
-        await runtime.flush()
+        connection.send(.serverStarted(initDuration: 0, httpPort: 1234))
+        await connection.flush()
 
         // Already written: readable without waiting.
         socket.setReadTimeout(milliseconds: 100)
@@ -48,10 +55,11 @@ import Testing
 
     @Test func unrecoverableErrorIsWrittenBeforeReturning() async throws {
         let socket = try TestSocket()
-        let runtime = VercelRuntime(ipcPath: socket.path)
+        let runtime = RuntimeLink()
+        try runtime.connect(path: socket.path) { _ in }
         try socket.accept()
 
-        await runtime.unrecoverableError(message: "boom")
+        await runtime.unrecoverableError(exitCode: 1, message: "boom")
 
         socket.setReadTimeout(milliseconds: 100)
         #expect(try await socket.nextFrame() == #"{"type":"unrecoverable-error","payload":{"exitCode":1,"message":"boom"}}"#)
@@ -59,24 +67,26 @@ import Testing
 
     @Test func shutdownDrainsQueueThenClosesSocket() async throws {
         let socket = try TestSocket()
-        let runtime = VercelRuntime(ipcPath: socket.path)
+        let connection = try IPCConnection(path: socket.path)
         try socket.accept()
 
         for requestID in 1...3 {
-            runtime.requestEnded(InvocationContext(invocationID: "inv", requestID: UInt32(requestID)))
+            connection.send(.end(InvocationContext(invocationID: "inv", requestID: UInt32(requestID))))
         }
-        await runtime.shutdown()
+        await connection.close()
 
         #expect(try await socket.frames(3).count == 3)
         #expect(try await socket.isClosed())
-        #expect(runtime.connection?.send(.serverStarted(initDuration: 0, httpPort: 1)) == false)
+        #expect(connection.send(.serverStarted(initDuration: 0, httpPort: 1)) == false)
     }
 
     @Test func decodesFramesSplitAcrossReads() async throws {
         let socket = try TestSocket()
         let received = Mutex<[RuntimeMessage]>([])
-        let connection = try IPCConnection(path: socket.path) { message in
-            received.withLock { $0.append(message) }
+        let connection = try IPCConnection(path: socket.path) { frame in
+            if let message = RuntimeMessage(frame: frame.readableBytesView) {
+                received.withLock { $0.append(message) }
+            }
         }
         try socket.accept()
 
@@ -97,7 +107,7 @@ import Testing
     /// before its `end`, with nothing lost or duplicated.
     @Test func preservesPerRequestOrderingUnderConcurrency() async throws {
         let socket = try TestSocket()
-        let runtime = VercelRuntime(ipcPath: socket.path)
+        let connection = try IPCConnection(path: socket.path)
         try socket.accept()
         let requests = 200
         let logsPerRequest = 20
@@ -108,9 +118,9 @@ import Testing
                 group.addTask {
                     let context = InvocationContext(invocationID: "inv", requestID: UInt32(requestID))
                     for line in 0..<logsPerRequest {
-                        runtime.log("line \(line)", level: .info, context: context)
+                        connection.send(.log(context, message: "line \(line)", level: .info))
                     }
-                    runtime.requestEnded(context)
+                    connection.send(.end(context))
                 }
             }
         }
@@ -135,14 +145,14 @@ import Testing
             }
         }
         #expect(ended.count == requests)
-        #expect(runtime.connection?.droppedLogCount == 0)
+        #expect(connection.droppedLogCount == 0)
     }
 
     /// A runtime that stops reading must not block callers. Logs beyond the cap are dropped and
     /// counted; `end` is never dropped.
     @Test func stalledRuntimeNeverBlocksSendersAndNeverDropsEnd() async throws {
         let socket = try TestSocket()
-        let runtime = VercelRuntime(ipcPath: socket.path)
+        let connection = try IPCConnection(path: socket.path)
         try socket.accept()
         let context = InvocationContext(invocationID: "inv", requestID: 1)
         let line = String(repeating: "x", count: 2048)
@@ -150,15 +160,15 @@ import Testing
         // ~10 MB of logs while nobody reads: far more than the socket buffer and the 1 MiB cap.
         let started = ContinuousClock.now
         for _ in 0..<5000 {
-            runtime.log(line, level: .info, context: context)
+            connection.send(.log(context, message: line, level: .info))
         }
-        runtime.requestEnded(context)
+        connection.send(.end(context))
         let elapsed = ContinuousClock.now - started
         #expect(elapsed < .seconds(1), "sending blocked for \(elapsed)")
 
         // Start reading: everything accepted arrives, ending with `end`.
         let frames = try await socket.frames { $0.contains(#""type":"end""#) }
-        let dropped = try #require(runtime.connection?.droppedLogCount)
+        let dropped = connection.droppedLogCount
         #expect(dropped > 0)
         #expect(frames.count - 1 + dropped == 5000)
         print("stalled runtime: sent 5000 x 2 KB logs in \(elapsed); delivered \(frames.count - 1), dropped \(dropped)")
@@ -166,7 +176,7 @@ import Testing
 
     @Test func throughput() async throws {
         let socket = try TestSocket()
-        let runtime = VercelRuntime(ipcPath: socket.path)
+        let connection = try IPCConnection(path: socket.path)
         try socket.accept()
         let senders = 8
         let messagesPerSender = 25_000
@@ -178,7 +188,7 @@ import Testing
             for _ in 0..<senders {
                 group.addTask {
                     for _ in 0..<messagesPerSender {
-                        runtime.requestEnded(context)
+                        connection.send(.end(context))
                     }
                 }
             }

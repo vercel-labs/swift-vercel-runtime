@@ -8,21 +8,24 @@ import Musl
 import NIOCore
 import NIOPosix
 
-/// The connection to the Vercel functions runtime over the `VERCEL_IPC_PATH` Unix socket.
+/// A connection carrying NUL-terminated JSON messages over a Unix socket.
+///
+/// Used twice: by the bootstrap to talk to the Vercel functions runtime (`VERCEL_IPC_PATH`), and
+/// by an app to talk to the bootstrap (`VERCEL_BOOTSTRAP_SOCKET`).
 ///
 /// All socket I/O is non-blocking and runs on a SwiftNIO event loop:
-/// - ``send(_:)`` encodes the message on the caller's thread and appends it to an in-memory
-///   outbox. It never waits for the socket, so it is safe from synchronous code such as swift-log
-///   handlers and never stalls Swift's cooperative thread pool.
+/// - ``send(json:droppable:)`` appends the message to an in-memory outbox and returns. It never
+///   waits for the socket, so it is safe from synchronous code such as swift-log handlers and
+///   never stalls Swift's cooperative thread pool.
 /// - A single writer task drains the outbox, writing everything queued with one flush and waiting
 ///   for the write to complete before taking the next batch. Frames keep their order.
-/// - Messages from the runtime (like `approaching-timeout`) are read as an async sequence and
-///   delivered to the `onMessage` handler.
-public final class IPCConnection: Sendable {
-    public enum Error: Swift.Error, Equatable {
+/// - Incoming frames are delivered to `onFrame` in order.
+package final class IPCConnection: Sendable {
+    package enum Error: Swift.Error, Equatable {
         case pathTooLong(String)
         case socket(errno: Int32)
         case connect(path: String, errno: Int32)
+        case handshake(String)
     }
 
     let outbox: IPCOutbox
@@ -30,44 +33,50 @@ public final class IPCConnection: Sendable {
 
     /// Connects to the Unix domain socket at `path`.
     ///
-    /// The connect itself is synchronous, so a missing or refused socket throws immediately. The
-    /// connected socket is then handed to SwiftNIO, which owns it from there.
-    public init(
+    /// The connect itself is synchronous, so a missing or refused socket throws immediately.
+    package convenience init(
         path: String,
         eventLoopGroup: any EventLoopGroup = MultiThreadedEventLoopGroup.singleton,
-        onMessage: @escaping @Sendable (RuntimeMessage) -> Void = { _ in }
+        onFrame: @escaping @Sendable (ByteBuffer) -> Void = { _ in }
     ) throws {
-        let descriptor = try unixConnect(path: path)
+        try self.init(descriptor: unixConnect(path: path), eventLoopGroup: eventLoopGroup, onFrame: onFrame)
+    }
+
+    /// Takes ownership of an already connected socket.
+    package init(
+        descriptor: CInt,
+        eventLoopGroup: any EventLoopGroup = MultiThreadedEventLoopGroup.singleton,
+        onFrame: @escaping @Sendable (ByteBuffer) -> Void = { _ in }
+    ) {
         let outbox = IPCOutbox()
         self.outbox = outbox
         // Detached: the connection lives for the whole process and must not inherit the caller's
         // task-locals or priority.
         self.task = Task.detached {
-            await Self.run(descriptor: descriptor, eventLoopGroup: eventLoopGroup, outbox: outbox, onMessage: onMessage)
+            await Self.run(descriptor: descriptor, eventLoopGroup: eventLoopGroup, outbox: outbox, onFrame: onFrame)
         }
     }
 
-    /// Queues a message. Returns immediately; `false` means it was dropped because the runtime is
-    /// not keeping up (only `log` messages are ever dropped) or the connection is closed.
+    /// Queues a message. Returns immediately; `false` means it was dropped, either because it is
+    /// `droppable` and the other side is not keeping up, or because the connection is closed.
     @discardableResult
-    public func send(_ message: IPCMessage) -> Bool {
-        let isLog = if case .log = message { true } else { false }
-        return outbox.enqueue(message.json, isLog: isLog)
+    package func send(json: String, droppable: Bool = false) -> Bool {
+        outbox.enqueue(json, isLog: droppable)
     }
 
     /// Waits until every message sent before this call has been written to the socket.
-    public func flush() async {
+    package func flush() async {
         await outbox.flush()
     }
 
     /// Writes any queued messages, then closes the socket.
-    public func close() async {
+    package func close() async {
         outbox.finish()
         await task.value
     }
 
-    /// `log` messages dropped because the runtime was not reading fast enough.
-    public var droppedLogCount: Int {
+    /// Droppable messages dropped because the other side was not reading fast enough.
+    package var droppedLogCount: Int {
         outbox.totalDroppedLogs
     }
 
@@ -79,7 +88,7 @@ public final class IPCConnection: Sendable {
         descriptor: CInt,
         eventLoopGroup: any EventLoopGroup,
         outbox: IPCOutbox,
-        onMessage: @escaping @Sendable (RuntimeMessage) -> Void
+        onFrame: @escaping @Sendable (ByteBuffer) -> Void
     ) async {
         do {
             let asyncChannel = try await ClientBootstrap(group: eventLoopGroup).withConnectedSocket(descriptor) { channel in
@@ -96,17 +105,15 @@ public final class IPCConnection: Sendable {
                 try await withThrowingDiscardingTaskGroup { group in
                     group.addTask {
                         for try await frame in inbound {
-                            if let message = RuntimeMessage(frame: frame.readableBytesView) {
-                                onMessage(message)
-                            }
+                            onFrame(frame)
                         }
-                        // The runtime closed its end of the socket.
+                        // The other side closed its end of the socket.
                         outbox.terminate()
                     }
 
                     while let batch = await outbox.nextBatch() {
                         if batch.droppedLogs > 0 {
-                            writeToStandardError("[vercel] dropped \(batch.droppedLogs) log messages: the runtime was not reading fast enough")
+                            writeToStandardError("[vercel] dropped \(batch.droppedLogs) log messages: the receiver was not reading fast enough")
                         }
                         try await channel.writeAndFlush(batch.bytes).get()
                         outbox.batchWritten()
@@ -114,6 +121,8 @@ public final class IPCConnection: Sendable {
                     group.cancelAll()
                 }
             }
+        } catch is CancellationError {
+            // Closed by `close()`: the reader stops once the writer has drained.
         } catch {
             writeToStandardError("[vercel] IPC connection closed: \(error)")
         }
@@ -121,14 +130,17 @@ public final class IPCConnection: Sendable {
     }
 }
 
-/// Splits the runtime's byte stream into NUL-terminated frames.
-struct NULDelimitedFrameDecoder: ByteToMessageDecoder {
-    typealias InboundOut = ByteBuffer
+/// Splits a byte stream into NUL-terminated frames.
+package struct NULDelimitedFrameDecoder: ByteToMessageDecoder {
+    package typealias InboundOut = ByteBuffer
 
-    /// Messages from the runtime are tiny; refuse to buffer unbounded garbage.
+    /// Control messages are tiny and logs are capped well below this; refuse to buffer unbounded
+    /// garbage.
     static let maxFrameLength = 1 << 20
 
-    mutating func decode(context: ChannelHandlerContext, buffer: inout ByteBuffer) throws -> DecodingState {
+    package init() {}
+
+    package mutating func decode(context: ChannelHandlerContext, buffer: inout ByteBuffer) throws -> DecodingState {
         let view = buffer.readableBytesView
         guard let terminator = view.firstIndex(of: 0) else {
             guard buffer.readableBytes <= Self.maxFrameLength else {
@@ -142,7 +154,7 @@ struct NULDelimitedFrameDecoder: ByteToMessageDecoder {
         return .continue
     }
 
-    mutating func decodeLast(context: ChannelHandlerContext, buffer: inout ByteBuffer, seenEOF: Bool) throws -> DecodingState {
+    package mutating func decodeLast(context: ChannelHandlerContext, buffer: inout ByteBuffer, seenEOF: Bool) throws -> DecodingState {
         try decode(context: context, buffer: &buffer)
     }
 }
@@ -150,9 +162,11 @@ struct NULDelimitedFrameDecoder: ByteToMessageDecoder {
 // MARK: - System calls
 // Kept as free functions so names like `connect` and `close` refer to libc.
 
-/// A blocking connect is fine here: it is a local Unix socket, it completes immediately, and it
-/// runs once at startup. Everything after it is non-blocking.
-private func unixConnect(path: String) throws -> CInt {
+/// Connects a Unix stream socket, blocking. Fine here: it is a local socket, it completes
+/// immediately, and it runs once per process. Everything after it is non-blocking.
+///
+/// The descriptor is close-on-exec so child processes never inherit it.
+package func unixConnect(path: String) throws -> CInt {
     #if canImport(Glibc)
     let streamType = Int32(SOCK_STREAM.rawValue)
     #else
@@ -161,6 +175,7 @@ private func unixConnect(path: String) throws -> CInt {
 
     let fd = socket(AF_UNIX, streamType, 0)
     guard fd >= 0 else { throw IPCConnection.Error.socket(errno: errno) }
+    _ = fcntl(fd, F_SETFD, FD_CLOEXEC)
 
     var address = sockaddr_un()
     address.sun_family = sa_family_t(AF_UNIX)
@@ -191,17 +206,49 @@ private func unixConnect(path: String) throws -> CInt {
     }
 }
 
-func environmentValue(_ name: String) -> String? {
+/// Reads one NUL-terminated frame from a blocking socket, giving up after `timeoutSeconds`.
+///
+/// Reads a byte at a time so nothing past the frame is consumed: the descriptor is handed to
+/// SwiftNIO right after.
+package func readFrameBlocking(_ fd: CInt, timeoutSeconds: Int = 5) throws -> [UInt8] {
+    var timeout = timeval(tv_sec: timeoutSeconds, tv_usec: 0)
+    _ = setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
+    defer {
+        var none = timeval(tv_sec: 0, tv_usec: 0)
+        _ = setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &none, socklen_t(MemoryLayout<timeval>.size))
+    }
+    var frame: [UInt8] = []
+    var byte: UInt8 = 0
+    while frame.count < 4096 {
+        let count = read(fd, &byte, 1)
+        if count == 1 {
+            if byte == 0 { return frame }
+            frame.append(byte)
+        } else if count < 0 && errno == EINTR {
+            continue
+        } else {
+            throw IPCConnection.Error.handshake(count == 0 ? "socket closed" : "read failed (errno \(errno))")
+        }
+    }
+    throw IPCConnection.Error.handshake("frame too long")
+}
+
+package func environmentValue(_ name: String) -> String? {
     guard let value = getenv(name) else { return nil }
     return String(cString: value)
 }
 
 /// Diagnostics only: a rare, small, synchronous write to stderr.
-func writeToStandardError(_ message: String) {
+package func writeToStandardError(_ message: String) {
+    writeLine(message, to: 2)
+}
+
+/// Writes a line with a single write(2), so concurrent lines never interleave.
+package func writeLine(_ message: String, to descriptor: CInt) {
     var line = message
     if !line.hasSuffix("\n") { line += "\n" }
     let bytes = Array(line.utf8)
     bytes.withUnsafeBytes { buffer in
-        _ = write(2, buffer.baseAddress, buffer.count)
+        _ = write(descriptor, buffer.baseAddress, buffer.count)
     }
 }

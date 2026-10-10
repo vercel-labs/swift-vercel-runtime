@@ -1,15 +1,24 @@
 import Hummingbird
 import HummingbirdWebSocket
 import Logging
-import VercelHummingbirdWebSocket
+import VercelRuntime
 
+// A regular Hummingbird app: nothing here is required to run on Vercel. It listens on
+// Hummingbird's default 127.0.0.1:8080, and the Vercel bootstrap finds it there.
+//
+// `VercelRuntime` is optional. It is used here for per-request logs, `waitUntil` and the request
+// helpers.
 @main
 struct App {
     static func main() async throws {
-        // Attributes logs to the request that produced them in Vercel's logs.
+        // Optional: groups logs by request in Vercel's logs (with the middleware below). Logs reach
+        // Vercel without it too. If you already call LoggingSystem.bootstrap, add VercelLogHandler
+        // there with MultiplexLogHandler instead.
         VercelLogHandler.bootstrap()
 
         let router = Router()
+        // Runs every route as part of its Vercel request (logs and waitUntil). See below.
+        router.add(middleware: VercelRequestMiddleware())
         let region = Environment().get("VERCEL_REGION")
         let logger = Logger(label: "app")
 
@@ -70,18 +79,20 @@ struct App {
             return "scheduled\n"
         }
 
-        // Scheduled from vercel.json. Requires `Authorization: Bearer $CRON_SECRET` when set.
-        router.group("cron").add(middleware: VercelCronMiddleware()).get { _, _ in
+        // Scheduled from vercel.json. With CRON_SECRET set, Vercel's bootstrap rejects requests
+        // without `Authorization: Bearer $CRON_SECRET` before they get here.
+        router.get("cron") { _, _ in
             logger.info("cron job ran")
             return "cron ok\n"
         }
 
         router.get("geo") { request, _ in
             let environment = VercelEnvironment.current
+            let vercel = request.headers.vercel
             return RequestDetails(
-                id: request.vercel.id,
-                ipAddress: request.vercel.ipAddress,
-                geolocation: request.vercel.geolocation,
+                id: vercel.id,
+                ipAddress: vercel.ipAddress,
+                geolocation: vercel.geolocation,
                 environment: environment.target?.rawValue,
                 region: environment.region
             )
@@ -107,8 +118,18 @@ struct App {
             )
         }
 
-        let app = Application(vercel: router, server: .vercelWebSocketUpgrade(webSocketRouter: webSocketRouter))
+        let app = Application(router: router, server: .http1WebSocketUpgrade(webSocketRouter: webSocketRouter))
         try await app.runService()
+    }
+}
+
+/// Runs each request inside `Vercel.withRequest`, so `VercelLogHandler` attributes its logs to it
+/// and `Vercel.waitUntil` keeps the function alive for its background work. Locally it does nothing.
+struct VercelRequestMiddleware<Context: RequestContext>: RouterMiddleware {
+    func handle(_ request: Request, context: Context, next: (Request, Context) async throws -> Response) async throws -> Response {
+        try await Vercel.withRequest(request.headers) {
+            try await next(request, context)
+        }
     }
 }
 

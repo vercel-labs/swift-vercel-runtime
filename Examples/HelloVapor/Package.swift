@@ -10,7 +10,7 @@ let package = Package(
         .executable(name: "VaporApp", targets: ["App"]),
     ],
     dependencies: [
-        // In your app: .package(url: "https://github.com/vercel-labs/swift-vercel-runtime.git", from: "0.1.0")
+        // In your app: .package(url: "https://github.com/vercel-labs/swift-vercel-runtime.git", from: "0.2.0")
         .package(name: "swift-vercel-runtime", path: "../.."),
         .package(url: "https://github.com/vapor/vapor.git", from: "5.0.0-beta.3"),
         // Vapor 5.0.0-beta.3 resolves swift-http-server 0.3.0, which fails to compile against the
@@ -26,8 +26,9 @@ let package = Package(
         .executableTarget(
             name: "App",
             dependencies: [
-                .product(name: "VercelVapor", package: "swift-vercel-runtime"),
                 .product(name: "Vapor", package: "vapor"),
+                // Optional: per-request logs, waitUntil and request helpers.
+                .product(name: "VercelRuntime", package: "swift-vercel-runtime"),
             ]
         ),
     ]

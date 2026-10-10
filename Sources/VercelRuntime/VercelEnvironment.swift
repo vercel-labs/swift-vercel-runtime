@@ -67,7 +67,7 @@ public struct VercelEnvironment: Sendable {
     public var deploymentID: String? { self["VERCEL_DEPLOYMENT_ID"] }
     public var isSkewProtectionEnabled: Bool { self["VERCEL_SKEW_PROTECTION_ENABLED"] == "1" }
     public var automationBypassSecret: String? { self["VERCEL_AUTOMATION_BYPASS_SECRET"] }
-    /// Process-level OIDC token. Prefer `request.vercel.oidcToken`, which is per request.
+    /// Process-level OIDC token. Prefer `request.headers.vercel.oidcToken`, which is per request.
     public var oidcToken: String? { self["VERCEL_OIDC_TOKEN"] }
     /// The secret Vercel sends with cron requests (`Authorization: Bearer <CRON_SECRET>`).
     public var cronSecret: String? { self["CRON_SECRET"] }

@@ -1,19 +1,33 @@
 # Swift Vercel Runtime
 
-Run Swift servers natively on [Vercel](https://vercel.com). Your app is cross-compiled with the
+Run Swift servers natively on [Vercel](https://vercel.com). Write a normal Vapor, Hummingbird or
+any other Swift HTTP server that listens on a port: no Vercel-specific code, adapters or
+framework packages. It is cross-compiled with the
 [Swift Static Linux SDK](https://www.swift.org/documentation/articles/static-linux-getting-started.html)
-into a single static binary that Vercel's `executable` runtime runs directly: no Docker, no proxy,
-streaming responses and concurrent requests included.
+into a static binary that Vercel's `executable` runtime runs directly, with no Docker, streaming
+responses, WebSockets and concurrent requests included.
 
 | Product | Use it for |
 | --- | --- |
-| `VercelHummingbird` | [Hummingbird 2](https://github.com/hummingbird-project/hummingbird) apps |
-| `VercelHummingbirdWebSocket` | WebSockets for Hummingbird apps, with [hummingbird-websocket](https://github.com/hummingbird-project/hummingbird-websocket) |
-| `VercelVapor` | [Vapor 5](https://github.com/vapor/vapor) apps (currently beta) |
-| `VercelRuntime` | The runtime protocol itself, for any other Swift HTTP server |
 | `VercelBuildPlugin` | `swift package vercel-build`: builds `.vercel/output` for `vercel deploy --prebuilt` |
+| `VercelRuntime` | Optional: per-request logs, `waitUntil`, request helpers (geolocation, IP, OIDC), environment |
+| `VercelBootstrap` | The function's entrypoint. Built and deployed by the plugin; you never import it |
 
-SwiftPM only resolves the framework behind the adapter you use.
+## How it works
+
+This is how Vercel runs standalone Go servers too. Each function contains your app's binary and
+`VercelBootstrap`, a small SwiftNIO program that implements the Vercel functions runtime protocol
+for it:
+
+1. The bootstrap starts your app with `PORT` set, and finds the port it actually listens on (so
+   apps that ignore `PORT`, like Hummingbird's default `127.0.0.1:8080`, work too).
+2. It listens on its own port and proxies every request to your app: it answers Vercel's health
+   checks, strips the runtime's internal headers, streams bodies in both directions and tunnels
+   WebSockets.
+3. It tells the runtime when each request is done, enforces `CRON_SECRET` on cron paths, forwards
+   `SIGTERM` for graceful shutdown, and reports a crashed app.
+
+Your app never needs to know it runs on Vercel. `swift run` works locally as usual.
 
 ## Getting started
 
@@ -55,6 +69,8 @@ vercel login
 
 ### 4. Create an app
 
+Any Swift server works. With Hummingbird:
+
 ```sh
 mkdir hello && cd hello
 swift package init --type executable --name hello
@@ -68,33 +84,29 @@ import PackageDescription
 
 let package = Package(
     name: "hello",
-    platforms: [.macOS("26.2")],
+    platforms: [.macOS(.v15)],
     dependencies: [
-        .package(url: "https://github.com/vercel-labs/swift-vercel-runtime.git", from: "0.1.0"),
         .package(url: "https://github.com/hummingbird-project/hummingbird.git", from: "2.27.0"),
+        // Provides `swift package vercel-build`. Nothing to import.
+        .package(url: "https://github.com/vercel-labs/swift-vercel-runtime.git", from: "0.2.0"),
     ],
     targets: [
         .executableTarget(name: "hello", dependencies: [
-            .product(name: "VercelHummingbird", package: "swift-vercel-runtime"),
             .product(name: "Hummingbird", package: "hummingbird"),
         ]),
     ]
 )
 ```
 
-The `platforms` line is required: this package needs macOS 26.2 (because Vapor 5 does), and new
-packages default to an older version.
-
-Replace `Sources/hello/hello.swift`:
+Replace `Sources/hello/hello.swift` with a plain Hummingbird app:
 
 ```swift
 import Hummingbird
-import VercelHummingbird
 
 let router = Router()
 router.get("/") { _, _ in "Hello from Swift on Vercel" }
 
-let app = Application(vercel: router)  // same arguments as Application(router:)
+let app = Application(router: router)
 try await app.runService()
 ```
 
@@ -123,20 +135,19 @@ setup before compiling.
 
 ## Vapor
 
-Same setup as above, with these dependencies:
+Same setup, with a plain Vapor 5 app (currently beta). Vapor reads `PORT` from the environment:
 
 ```swift
 // Package.swift
-platforms: [.macOS("26.2")],
+platforms: [.macOS("26.2")],  // required by Vapor 5
 dependencies: [
-    .package(url: "https://github.com/vercel-labs/swift-vercel-runtime.git", from: "0.1.0"),
     .package(url: "https://github.com/vapor/vapor.git", from: "5.0.0-beta.3"),
     // Needed until swift-http-server tags a release with its musl fix (see Known issues).
     .package(url: "https://github.com/swift-server/swift-http-server.git", revision: "09ee2e3682248532c43975b1af5938628efb7ba8"),
+    .package(url: "https://github.com/vercel-labs/swift-vercel-runtime.git", from: "0.2.0"),
 ],
 targets: [
     .executableTarget(name: "App", dependencies: [
-        .product(name: "VercelVapor", package: "swift-vercel-runtime"),
         .product(name: "Vapor", package: "vapor"),
     ]),
 ]
@@ -144,43 +155,124 @@ targets: [
 
 ```swift
 import Vapor
-import VercelVapor
 
-let app = try Application.vercel()  // same arguments as Application(...)
+let app = try Application()
 app.get { _ in "Hello from Swift on Vercel" }
 try await app.start()
 ```
 
-Locally (outside Vercel) both behave like regular Hummingbird and Vapor apps, so `swift run` works
-as usual.
+Vapor defaults to its `development` environment, which shows error details in responses. Set
+`VAPOR_ENV=production` in your Vercel project's environment variables for production.
 
-## Vercel features
+## Other servers
 
-The adapters re-export `VercelRuntime`, so everything below is available with a single import.
+Any executable that serves HTTP/1.1 on a TCP port works: other frameworks, or a server written
+directly on SwiftNIO. The app should:
+
+- listen on `127.0.0.1` (or `0.0.0.0`), ideally on the `PORT` environment variable. If it listens
+  elsewhere the bootstrap finds the port anyway (and logs a note), preferring `PORT`, then the only
+  listening port, then 8080 or 3000,
+- start listening within 60 seconds,
+- shut down on `SIGTERM`.
+
+`Examples/HelloNIO` is such a server, written directly on SwiftNIO with no Vercel code or
+dependency besides the build plugin.
+
+## Optional Vercel features
+
+You do not need `VercelRuntime` to run on Vercel: without it your app gets routing, streaming,
+WebSockets, cron protection and graceful shutdown, and everything it prints reaches Vercel's logs.
+Add it for features that need to know which request your code is running for:
+
+```swift
+.product(name: "VercelRuntime", package: "swift-vercel-runtime"),
+```
+
+| Feature | API | Needs `Vercel.withRequest`? |
+| --- | --- | --- |
+| Logs attributed to their request, with levels | `VercelLogHandler` | Yes |
+| Background work after the response | `Vercel.waitUntil(for: request.headers)` | No |
+| | `Vercel.waitUntil { }` | Yes |
+| Geolocation, IP, request id, OIDC token | `request.headers.vercel` | No |
+| Deployment environment | `VercelEnvironment.current` | No |
+
+Everything below is a no-op or falls back to plain behavior locally, so the same code runs
+everywhere. Apps only connect to the bootstrap the first time they use `Vercel.withRequest` or
+`Vercel.waitUntil(for:)`; until then, requests end as soon as their response is done.
 
 ### Logs
 
-```swift
-VercelLogHandler.bootstrap()  // once, at the start of main
-```
+Logging works with no setup: everything your app writes to stdout and stderr, with `print` or any
+swift-log backend, shows up in Vercel's logs. Those lines are not tied to a request, though, which
+makes them hard to follow when one instance serves many requests at once.
 
-A swift-log backend. Inside a request, every log is sent to Vercel with its level and attributed to
-that request, even with many concurrent requests (the same mechanism the Node.js and Python runtimes
-use). Outside a request it writes a line to stdout (stderr for `error` and above). The level
-defaults to `LOG_LEVEL`, or `info`. `print` still goes to stdout without attribution, so prefer
-swift-log.
+To group logs by request, use `VercelLogHandler`, a swift-log backend. Inside `Vercel.withRequest`
+it sends each log to Vercel with its level and the request it belongs to; everywhere else (startup,
+background tasks, local development) it writes a line to stdout, or stderr for `error` and above.
+The level defaults to `LOG_LEVEL`, or `info`. It takes two steps.
+
+1. Install it as your swift-log backend. swift-log allows this exactly once per process, at the
+   start of `main`:
+
+   ```swift
+   VercelLogHandler.bootstrap()
+   ```
+
+   If your app already calls `LoggingSystem.bootstrap` (many app templates do), do not call both:
+   swift-log stops the process on a second call. Add `VercelLogHandler` to your existing setup
+   instead, with `MultiplexLogHandler`:
+
+   ```swift
+   LoggingSystem.bootstrap { label in
+       MultiplexLogHandler([
+           VercelLogHandler(label: label),
+           MyServiceLogHandler(label: label),  // your existing backend, for example a log service
+       ])
+   }
+   ```
+
+   `VercelLogHandler` already writes to stdout outside requests, so it replaces swift-log's
+   default `StreamLogHandler`. Combining the two prints every line twice.
+
+2. Run your handlers inside `Vercel.withRequest`, typically from a middleware:
+
+   ```swift
+   import VercelRuntime
+
+   // Hummingbird
+   struct VercelRequestMiddleware<Context: RequestContext>: RouterMiddleware {
+       func handle(_ request: Request, context: Context, next: (Request, Context) async throws -> Response) async throws -> Response {
+           try await Vercel.withRequest(request.headers) { try await next(request, context) }
+       }
+   }
+   router.add(middleware: VercelRequestMiddleware())
+
+   // Vapor
+   struct VercelRequestMiddleware: Middleware {
+       func respond(to request: Request, chainingTo next: any Responder) async throws -> Response {
+           try await Vercel.withRequest(request.headers) { try await next.respond(to: request) }
+       }
+   }
+   app.middleware.use(VercelRequestMiddleware())
+   ```
+
+   `withRequest` takes the request's `HTTPFields`, so it works the same with any framework built on
+   swift-http-types. Logs from code that runs after the handler returns, like a streamed response
+   body or a WebSocket, are not attributed.
 
 ### waitUntil
 
 ```swift
-Vercel.waitUntil {
+Vercel.waitUntil(for: request.headers) {
     try await analytics.track("signup")
 }
 ```
 
-Runs work after the response is sent, and keeps the function alive until it finishes. When the
-request approaches its maximum duration the work is cancelled, so check `Task.isCancelled` in long
-loops. Logs from the work stay attributed to the request.
+Runs work after the response is sent, and keeps the function alive until it finishes. Inside
+`Vercel.withRequest` (for example with the middleware above), `Vercel.waitUntil { ... }` works
+without passing the headers. When the request approaches its maximum duration the work is
+cancelled, so check `Task.isCancelled` in long loops. Logs from the work stay attributed to the
+request.
 
 ### Cron jobs
 
@@ -191,25 +283,19 @@ deployment:
 { "crons": [{ "path": "/cron", "schedule": "0 5 * * *" }] }
 ```
 
-Protect the route so only Vercel can call it when the project has a `CRON_SECRET`:
-
-```swift
-// Vapor
-app.grouped(VercelCronMiddleware()).get("cron") { _ in "ok" }
-// Hummingbird
-router.group("cron").add(middleware: VercelCronMiddleware()).get { _, _ in "ok" }
-```
-
-Without `CRON_SECRET` every request is allowed, matching Vercel's Python runtime. Crons only run on
+Cron routes are ordinary routes. When the project has a `CRON_SECRET` environment variable, the
+bootstrap answers `401` to requests for the cron paths that lack `Authorization: Bearer
+<CRON_SECRET>`, so only Vercel can trigger them; your app does not need to check. Crons only run on
 production deployments.
 
 ### Request helpers
 
 ```swift
-req.vercel.geolocation   // city, country, flag, countryRegion, region, latitude, longitude, postalCode
-req.vercel.ipAddress     // x-real-ip
-req.vercel.id            // x-vercel-id, as shown in Vercel's logs
-req.vercel.oidcToken     // per-request OIDC token, or VERCEL_OIDC_TOKEN
+let vercel = request.headers.vercel
+vercel.geolocation   // city, country, flag, countryRegion, region, latitude, longitude, postalCode
+vercel.ipAddress     // x-real-ip
+vercel.id            // x-vercel-id, as shown in Vercel's logs
+vercel.oidcToken     // per-request OIDC token, or VERCEL_OIDC_TOKEN
 
 let environment = VercelEnvironment.current
 environment.target       // .production, .preview or .development (VERCEL_ENV)
@@ -218,19 +304,16 @@ environment.region       // VERCEL_REGION
 environment.git.commitSHA
 ```
 
-These match `geolocation`, `ipAddress` and `getEnv` from `@vercel/functions`. On any `HTTPFields`
-they are available as `headers.vercel`.
+These match `geolocation`, `ipAddress` and `getEnv` from `@vercel/functions`, and work on any
+`HTTPFields` (`request.headers` in Vapor 5 and Hummingbird 2).
 
-### WebSockets
+## WebSockets
 
-Vercel tunnels WebSocket connections to functions on Fluid Compute. With Hummingbird, add
-`VercelHummingbirdWebSocket` and serve with `.vercelWebSocketUpgrade` instead of
-`.http1WebSocketUpgrade`:
+Vercel tunnels WebSocket connections to functions on Fluid Compute, and the bootstrap passes them
+through to your app. Serve them however your framework does; with Hummingbird and
+hummingbird-websocket:
 
 ```swift
-import HummingbirdWebSocket
-import VercelHummingbirdWebSocket
-
 let webSocketRouter = Router(context: BasicWebSocketRequestContext.self)
 webSocketRouter.ws("ws") { inbound, outbound, _ in
     for try await message in inbound.messages(maxSize: 1 << 16) {
@@ -240,19 +323,15 @@ webSocketRouter.ws("ws") { inbound, outbound, _ in
     }
 }
 
-let app = Application(vercel: router, server: .vercelWebSocketUpgrade(webSocketRouter: webSocketRouter))
+let app = Application(router: router, server: .http1WebSocketUpgrade(webSocketRouter: webSocketRouter))
 ```
 
-The closure form, `.vercelWebSocketUpgrade { head, channel, logger in ... }`, is also available.
+The request ends as soon as the upgrade is answered, and the platform then keeps the connection open
+in both directions; this is how Vercel's Node.js, Python, Rust and Go runtimes work too. So code
+inside a WebSocket handler runs outside the request: its logs are not attributed to it, and
+`waitUntil` work started there is not waited for.
 
-The invocation ends as soon as the upgrade is accepted (or declined), and the platform then keeps
-the connection open in both directions; this is how Vercel's Node.js, Python, Rust and Go runtimes
-work too. So code inside a WebSocket handler runs outside the request: its logs go to stdout
-without request attribution, and `Vercel.waitUntil` work started there runs as a plain task that
-the platform does not wait for.
-
-Vapor 5 does not support WebSockets yet (they are disabled in the 5.0 betas, and swift-http-server
-has no HTTP/1.1 upgrade support).
+Vapor 5 does not support WebSockets yet (they are disabled in the 5.0 betas).
 
 ## Build options
 
@@ -277,63 +356,53 @@ in swift-aws-lambda-runtime). Its build files go to `.build/vercel`.
 | `--no-strip` | | Keep debug symbols |
 
 The output follows the [Build Output API](https://vercel.com/docs/build-output-api/v3): one
-function (`functions/index.func`) with `"runtime": "executable"`, plus a route that sends every
-path to it. SwiftPM resource bundles are copied next to the binary, and `crons` are taken from
-`vercel.json` (other `vercel.json` settings are not applied to prebuilt deployments).
+function (`functions/index.func`) with `"runtime": "executable"` whose handler, `executable`, is
+the bootstrap, with your app's binary next to it, plus a route that sends every path to it. SwiftPM resource bundles
+are copied next to the binaries, and `crons` are taken from `vercel.json` (other `vercel.json`
+settings are not applied to prebuilt deployments).
 
-## Other Swift servers
+## The bootstrap in detail
 
-Any server can run on Vercel with `VercelRuntime`. On Vercel the process is started with
-`VERCEL_IPC_PATH` set, and it must:
+On Vercel the bootstrap is started with `VERCEL_IPC_PATH` set. It:
 
-1. listen on `127.0.0.1` (any port, `0` is fine) and report the port once listening,
-2. answer `GET /_vercel/ping` with `200` without sending anything,
-3. strip the runtime's internal request headers,
-4. report every finished request, including errors.
-5. for WebSocket (HTTP/1.1 `Upgrade`) requests, report the request finished as soon as it answers
-   the upgrade, not when the socket closes.
+1. connects to the runtime's Unix socket,
+2. starts the app with the project's environment, minus `VERCEL_IPC_PATH`, plus `PORT` and
+   `VERCEL_BOOTSTRAP_SOCKET`,
+3. waits until the app listens (read from `/proc` on Linux), listens on `127.0.0.1:0` and sends
+   `server-started` with that port,
+4. for each request: answers `GET /_vercel/ping` itself; removes `x-vercel-internal-*` headers
+   (exposing the OIDC token as `x-vercel-oidc-token`) and the runtime cache headers; adds an opaque
+   `x-vercel-bootstrap-request` token (replacing any sent by a client); proxies the request on a
+   dedicated connection to the app; and sends `end` once the response is complete, or right after
+   a `101 Switching Protocols`,
+5. on `SIGTERM`, forwards it to the app and exits with it. If the app exits on its own, it reports
+   an `unrecoverable-error` and exits.
 
-```swift
-import VercelRuntime
-
-let runtime = VercelRuntime.shared  // connects to VERCEL_IPC_PATH; no-op locally
-
-// 1. once the server is listening
-runtime.serverStarted(httpPort: port)
-
-// 2-4. per request
-if path == VercelHeader.pingPath { return ok("OK") }
-var headers: HTTPFields = request.headers
-let invocation = headers.removeVercelInternalFields()
-return try await runtime.withRequest(invocation) {
-    try await handle(request.with(headers))
-}
-```
-
-`withRequest` sends `end` once the handler and its `waitUntil` work are done, attributes
-`VercelLogHandler` logs to the request, and handles `approaching-timeout`.
-
-See `Sources/VercelHummingbird` for a complete adapter in about 60 lines.
+Apps that use `VercelRuntime` connect to `VERCEL_BOOTSTRAP_SOCKET`. The bootstrap then forwards
+their request-attributed logs, and holds each request's `end` until the app reports its `waitUntil`
+work done (or it is cancelled by `approaching-timeout`). Apps that never connect pay nothing for it.
 
 ## Development
 
 ```sh
-swift test                  # unit tests
+swift test                  # unit tests, including the proxy against a real NIO server
 scripts/test-linux.sh       # build every example with the plugin and run the contract
-                            # tests against the Linux binary
+                            # tests against the Linux binaries
 ```
 
 The binaries are fully static, so on Linux `test-linux.sh` runs them directly; on macOS it runs
 them in an `amazonlinux:2023` container (Docker). CI runs both commands on a Linux arm64 runner
 (`.github/workflows/ci.yml`).
 
-`scripts/fake-runtime.py` emulates Vercel's runtime: it spawns the binary the same way, decodes
-messages with the same strict schema, sends `approaching-timeout`, and checks ping handling,
-header stripping (including runtime cache headers), `end` messages for success/404/500/streaming/
-concurrent requests, per-request logs, `waitUntil` timing and cancellation, cron authorization,
-request helpers, and graceful shutdown. Examples that use `VercelHummingbirdWebSocket` also get
-WebSocket checks: `end` at accept while the socket stays open, text and binary echo, declined
-upgrades, and concurrent connections.
+`scripts/fake-runtime.py` emulates Vercel's runtime: it spawns the function's handler the same way,
+decodes messages with the same strict schema, sends `approaching-timeout`, and checks ping handling,
+the app's environment, header stripping (including runtime cache headers), `end` messages for
+success/404/500/streaming/concurrent requests, per-request logs, `waitUntil` timing and
+cancellation, cron authorization, request helpers, graceful shutdown, and that a crashing app is
+reported. Examples with WebSocket routes also get WebSocket checks: `end` at accept while the
+socket stays open, text and binary echo, declined upgrades, and concurrent connections. The
+Hummingbird example listens on its default port, which checks port discovery, and the SwiftNIO
+example has no Vercel code at all (the harness skips the optional-feature checks for it).
 
 ## Known issues
 
@@ -343,7 +412,6 @@ upgrades, and concurrent connections.
   revision pins in the root package, so the pin cannot live in this library.
 - Hummingbird links full Foundation, which includes ICU data: its binaries are about 62 MB versus
   about 29 MB for Vapor 5.
-- The package requires macOS 26.2 because Vapor 5 does.
 - After either side closes a WebSocket, clients see the close about 10 seconds later. Vercel's own
   Rust WebSocket example shows the same delay, so it comes from the platform.
 

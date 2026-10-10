@@ -9,16 +9,34 @@ import Logging
 
 /// A swift-log handler that attributes logs to the request that produced them.
 ///
-/// Inside a request on Vercel, each log is sent to the functions runtime with its level and the
-/// request's invocation, so it shows up under that request in Vercel's logs, even with many
-/// concurrent requests. Everywhere else (startup, background work after `end`, local
-/// development) it writes a line to standard output, or standard error for `error` and above.
+/// Inside ``Vercel/withRequest(_:_:)`` (or ``Vercel/waitUntil(for:_:)`` work) on Vercel, each log
+/// is sent with its level and the request it belongs to, so it shows up under that request in
+/// Vercel's logs, even with many concurrent requests. Everywhere else (startup, other code, local
+/// development) it writes a line to standard output, or standard error for `error` and above,
+/// which Vercel also collects.
 ///
-/// Install it once, before creating your application:
+/// It is optional: without it, logs still reach Vercel through standard output and error, just not
+/// tied to a request. Install it once, before creating your application:
 ///
 /// ```swift
 /// VercelLogHandler.bootstrap()
 /// ```
+///
+/// swift-log can only be bootstrapped once per process. If your app already calls
+/// `LoggingSystem.bootstrap`, add this handler to that call with `MultiplexLogHandler` instead of
+/// calling ``bootstrap(logLevel:metadataProvider:)`` too:
+///
+/// ```swift
+/// LoggingSystem.bootstrap { label in
+///     MultiplexLogHandler([
+///         VercelLogHandler(label: label),
+///         MyServiceLogHandler(label: label),
+///     ])
+/// }
+/// ```
+///
+/// It writes to standard output itself outside requests, so use it instead of swift-log's
+/// `StreamLogHandler`, not alongside it.
 public struct VercelLogHandler: LogHandler {
     public var metadata: Logger.Metadata = [:]
     public var metadataProvider: Logger.MetadataProvider?
@@ -38,7 +56,9 @@ public struct VercelLogHandler: LogHandler {
     /// Installs `VercelLogHandler` as the process-wide swift-log backend.
     ///
     /// swift-log can only be bootstrapped once per process, so call this at most once, at the very
-    /// start of `main`. The level defaults to the `LOG_LEVEL` environment variable, or `info`.
+    /// start of `main`, and not if your app calls `LoggingSystem.bootstrap` itself (combine the
+    /// handlers with `MultiplexLogHandler` there instead). The level defaults to the `LOG_LEVEL`
+    /// environment variable, or `info`.
     public static func bootstrap(logLevel: Logger.Level? = nil, metadataProvider: Logger.MetadataProvider? = nil) {
         LoggingSystem.bootstrap({ label, provider in
             VercelLogHandler(label: label, logLevel: logLevel, metadataProvider: provider)
@@ -68,19 +88,13 @@ public struct VercelLogHandler: LogHandler {
         }
         let text = Self.render(message: event.message.description, metadata: merged)
 
-        if let scope = Vercel.currentScope, scope.context.requestID != nil {
+        if let scope = Vercel.currentScope {
             // Vercel adds the timestamp and shows the level, so the message stays bare.
-            scope.runtime.log(text, level: IPCMessage.LogLevel(event.level), context: scope.context)
+            scope.client.log(text, level: IPCMessage.LogLevel(event.level), token: scope.token)
             return
         }
 
-        let line = "\(timestamp()) \(event.level) \(label): \(text)\n"
-        let descriptor: Int32 = event.level >= .error ? 2 : 1
-        let bytes = Array(line.utf8)
-        bytes.withUnsafeBytes { buffer in
-            // One write(2) per line keeps concurrent lines from interleaving.
-            _ = write(descriptor, buffer.baseAddress, buffer.count)
-        }
+        writeLine("\(timestamp()) \(event.level) \(label): \(text)", to: event.level >= .error ? 2 : 1)
     }
 
     static func render(message: String, metadata: Logger.Metadata) -> String {

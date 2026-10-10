@@ -45,14 +45,33 @@ for EXAMPLE in "$@"; do
     (cd "$EXAMPLE" && swift package --disable-sandbox vercel-build --architecture "$ARCHITECTURE")
   fi
 
-  # Vapor 5 avoids full Foundation; the runtime must not drag it (and ~40 MB of ICU data) back in.
-  # Hummingbird links Foundation itself, so it is exempt.
+  FUNCTION="$EXAMPLE/.vercel/output/functions/index.func"
+  APP_BINARY="$FUNCTION/$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["executable"])' "$FUNCTION/vercel-bootstrap.json")"
+  HANDLER="$FUNCTION/$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["handler"])' "$FUNCTION/.vc-config.json")"
+
+  # AWS Lambda runs a file named `bootstrap` in the function directory as its runtime, bypassing
+  # Vercel's. The fake runtime cannot catch that, so check for it.
+  if [ -e "$FUNCTION/bootstrap" ]; then
+    echo "FAIL  the function contains a file named bootstrap" >&2
+    exit 1
+  fi
+
+  # The bootstrap ships with every function, so it must stay small: no full Foundation (and its
+  # ~40 MB of ICU data).
+  if LC_ALL=C grep -q icudt "$HANDLER"; then
+    echo "FAIL  the bootstrap links full Foundation/ICU" >&2
+    exit 1
+  fi
+  echo "PASS  bootstrap does not link full Foundation/ICU ($(($(wc -c < "$HANDLER") / 1000000)) MB)"
+
+  # Vapor 5 avoids full Foundation; VercelRuntime must not drag it back in. Hummingbird links
+  # Foundation itself, so it is exempt.
   if [ "$EXAMPLE" = "Examples/HelloVapor" ]; then
-    if LC_ALL=C grep -q icudt "$EXAMPLE/.vercel/output/functions/index.func/executable"; then
+    if LC_ALL=C grep -q icudt "$APP_BINARY"; then
       echo "FAIL  $EXAMPLE links full Foundation/ICU" >&2
       exit 1
     fi
-    echo "PASS  binary does not link full Foundation/ICU"
+    echo "PASS  app does not link full Foundation/ICU"
   fi
 
   # Crons declared in vercel.json must be copied into the Build Output config.
@@ -66,20 +85,24 @@ assert actual == expected, "config.json crons %r != vercel.json crons %r" % (act
 print("PASS  config.json crons match vercel.json (%d)" % len(actual))
 EOF
 
-  # Examples that use the WebSocket adapter also get the WebSocket checks.
+  # Examples with WebSocket routes also get the WebSocket checks.
   HARNESS_FLAGS=""
-  if grep -q 'VercelHummingbirdWebSocket' "$ROOT/$EXAMPLE/Package.swift"; then
+  if grep -q 'HummingbirdWebSocket' "$ROOT/$EXAMPLE/Package.swift"; then
     HARNESS_FLAGS="--websocket"
+  fi
+  # Apps without VercelRuntime get every check except the optional features it provides.
+  if ! grep -q 'name: "VercelRuntime"' "$ROOT/$EXAMPLE/Package.swift"; then
+    HARNESS_FLAGS="$HARNESS_FLAGS --minimal"
   fi
   if [ "$HARNESS" = "native" ]; then
     # shellcheck disable=SC2086
-    python3 scripts/fake-runtime.py $HARNESS_FLAGS "$ROOT/$EXAMPLE/.vercel/output/functions/index.func/executable"
+    python3 scripts/fake-runtime.py $HARNESS_FLAGS "$ROOT/$FUNCTION"
   else
     docker run --rm --platform "$PLATFORM" \
       -e HARNESS_FLAGS="$HARNESS_FLAGS" \
-      -v "$ROOT/$EXAMPLE/.vercel/output/functions/index.func:/var/task:ro" \
+      -v "$ROOT/$FUNCTION:/var/task:ro" \
       -v "$ROOT/scripts/fake-runtime.py:/opt/fake-runtime.py:ro" \
       amazonlinux:2023 \
-      sh -c 'command -v python3 >/dev/null || dnf install -y -q python3 >/dev/null; python3 /opt/fake-runtime.py $HARNESS_FLAGS /var/task/executable'
+      sh -c 'command -v python3 >/dev/null || dnf install -y -q python3 >/dev/null; python3 /opt/fake-runtime.py $HARNESS_FLAGS /var/task'
   fi
 done

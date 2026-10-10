@@ -4,7 +4,9 @@
 Mirrors what rusty-runtime does on provided.al2023 (vercel/functions,
 packages/rusty-runtime-nodejs/crates/rusty_runtime/src/child):
 
-- listens on a Unix socket and spawns the binary with a cleared env plus VERCEL_IPC_PATH,
+- reads the handler from the function's .vc-config.json (the VercelBootstrap binary, which runs
+  the app),
+- listens on a Unix socket and spawns the handler with a cleared env plus VERCEL_IPC_PATH,
 - requires the first NUL-terminated JSON message to be `server-started` (or
   `unrecoverable-error`),
 - decodes every message with the same strict schema (unknown types or wrongly typed fields
@@ -13,9 +15,12 @@ packages/rusty-runtime-nodejs/crates/rusty_runtime/src/child):
   `end` message per request, with no IPC traffic for /_vercel/ping,
 - sends `approaching-timeout` like the runtime does shortly before a request's deadline.
 
-The example apps implement the same routes, so every adapter is checked the same way.
+The example apps implement the same routes, so every framework is checked the same way.
 
-Usage: fake-runtime.py [--websocket] /path/to/executable
+Usage: fake-runtime.py [--websocket] [--minimal] /path/to/functions/index.func
+
+--minimal skips the checks for the optional VercelRuntime features (per-request logs,
+waitUntil, request helpers), for apps without any Vercel code.
 Python 3.9 compatible (the amazonlinux:2023 image).
 """
 
@@ -164,9 +169,12 @@ class WebSocketClient:
 
 
 class Runtime:
-    def __init__(self, executable):
-        self.executable = os.path.abspath(executable)
-        self.socket_path = "/tmp/vercel-%d.sock" % os.getpid()
+    def __init__(self, function_directory, name="runtime"):
+        function_directory = os.path.abspath(function_directory)
+        with open(os.path.join(function_directory, ".vc-config.json")) as config:
+            handler = json.load(config)["handler"]
+        self.executable = os.path.join(function_directory, handler)
+        self.socket_path = "/tmp/vercel-%s-%d.sock" % (name, os.getpid())
         self.messages = queue.Queue()
         self.lock = threading.Condition()
         self.ends = {}      # (invocationId, requestId) -> count
@@ -193,7 +201,8 @@ class Runtime:
             "VERCEL_ENV": "preview",
             "VERCEL_REGION": "dev1",
             "CRON_SECRET": CRON_SECRET,
-            # Users can set these as project env vars; the server must still bind 127.0.0.1:0.
+            # Users can set these as project env vars. The bootstrap must still report its own
+            # ephemeral port, and gives the app a PORT of its own.
             "PORT": "9999",
             "HOSTNAME": "0.0.0.0",
         }
@@ -287,6 +296,27 @@ class Runtime:
         except urllib.error.HTTPError as error:
             return error.code, error.read()
 
+    def app_pid(self):
+        """The app process the bootstrap started (from any of its threads)."""
+        pids = []
+        tasks = "/proc/%d/task" % self.process.pid
+        for task in os.listdir(tasks):
+            with open(os.path.join(tasks, task, "children")) as children:
+                pids += [int(pid) for pid in children.read().split()]
+        check(len(pids) == 1, "expected one app process, got %r" % pids)
+        return pids[0]
+
+    def wait_for_message(self, kind, timeout=5.0):
+        deadline = time.monotonic() + timeout
+        with self.lock:
+            while True:
+                for message in self.other_messages:
+                    if message["type"] == kind:
+                        return message
+                remaining = deadline - time.monotonic()
+                check(remaining > 0, "no %s message" % kind)
+                self.lock.wait(remaining)
+
     def stop(self):
         self.process.send_signal(signal.SIGTERM)
         try:
@@ -297,8 +327,9 @@ class Runtime:
 
 
 def main():
-    arguments = [argument for argument in sys.argv[1:] if argument != "--websocket"]
+    arguments = [argument for argument in sys.argv[1:] if argument not in ("--websocket", "--minimal")]
     websocket = "--websocket" in sys.argv[1:]
+    minimal = "--minimal" in sys.argv[1:]
     if len(arguments) != 1:
         print(__doc__)
         return 2
@@ -331,6 +362,15 @@ def main():
             after = len(runtime.ends) + len(runtime.logs) + len(runtime.other_messages)
         check(after == before, "ping produced IPC messages")
 
+    @test("the app gets its own PORT and bootstrap socket, not the runtime's IPC socket")
+    def _():
+        with open("/proc/%d/environ" % runtime.app_pid(), "rb") as environ:
+            variables = dict(entry.split(b"=", 1) for entry in environ.read().split(b"\0") if b"=" in entry)
+        check(b"VERCEL_IPC_PATH" not in variables, "the app must not see VERCEL_IPC_PATH")
+        check(variables.get(b"PORT") not in (None, b"9999"), "PORT %r" % variables.get(b"PORT"))
+        check(variables.get(b"VERCEL_BOOTSTRAP_SOCKET"), "missing VERCEL_BOOTSTRAP_SOCKET")
+        check(variables.get(b"VERCEL_REGION") == b"dev1", "project env vars must reach the app")
+
     @test("GET / sends end with matching context")
     def _():
         status, body = runtime.request("/", "inv-a", 1)
@@ -347,6 +387,7 @@ def main():
         leaked = [name for name in names if name.startswith("x-vercel-internal-")]
         check(not leaked, "leaked internal headers: %r" % leaked)
         check("x-vercel-oidc-token" in names, "missing x-vercel-oidc-token in %r" % names)
+        check(names.count("x-vercel-bootstrap-request") == 1, "expected one bootstrap token in %r" % names)
         runtime.wait_for_end("inv-a", 2)
 
     @test("runtime cache headers follow the no-leak rules")
@@ -366,13 +407,14 @@ def main():
         runtime.wait_for_end("inv-sc", 1)
         runtime.wait_for_end("inv-sc", 2)
 
-    @test("JSON route")
-    def _():
-        status, body = runtime.request("/json", "inv-a", 3)
-        check(status == 200, "status %r" % status)
-        payload = json.loads(body)
-        check(payload.get("region") == "dev1", "payload %r" % payload)
-        runtime.wait_for_end("inv-a", 3)
+    if not minimal:
+        @test("JSON route")
+        def _():
+            status, body = runtime.request("/json", "inv-a", 3)
+            check(status == 200, "status %r" % status)
+            payload = json.loads(body)
+            check(payload.get("region") == "dev1", "payload %r" % payload)
+            runtime.wait_for_end("inv-a", 3)
 
     @test("404 still sends end")
     def _():
@@ -386,56 +428,63 @@ def main():
         check(status == 500, "status %r" % status)
         runtime.wait_for_end("inv-a", 5)
 
-    @test("streaming response delivers all chunks")
+    @test("streaming response delivers chunks as they are written")
     def _():
         started = time.monotonic()
-        status, body = runtime.request("/stream", "inv-a", 6)
-        check(status == 200, "status %r" % status)
+        req = urllib.request.Request("http://127.0.0.1:%d/stream" % runtime.port, headers={
+            "x-vercel-internal-invocation-id": "inv-a", "x-vercel-internal-request-id": "6"})
+        with urllib.request.urlopen(req, timeout=10) as response:
+            check(response.status == 200, "status %r" % response.status)
+            first = response.readline()
+            first_at = time.monotonic() - started
+            body = first + response.read()
         check(body == b"".join(b"chunk %d\n" % i for i in range(1, 6)), "body %r" % body)
+        check(first_at < 0.5, "first chunk arrived after %.2fs: the response was buffered" % first_at)
         check(time.monotonic() - started >= 0.8, "stream finished too fast")
         runtime.wait_for_end("inv-a", 6)
 
-    @test("logs are attributed to the request with their level")
-    def _():
-        status, _ = runtime.request("/log", "inv-log", 1)
-        check(status == 200, "status %r" % status)
-        runtime.wait_for_end("inv-log", 1)
-        logs = runtime.logs_for("inv-log", 1)
-        matching = [log for log in logs if "hello from swift-log" in log[1]]
-        check(matching, "no IPC log for the request, got %r" % logs)
-        check(matching[0][0] == "warn", "expected level warn, got %r" % matching[0][0])
-        check("route=log" in matching[0][1], "metadata missing: %r" % matching[0][1])
-        check(not any("hello from swift-log" in line for line in runtime.stdout_lines),
-              "request log was also written to stdout")
+    if not minimal:
+        @test("logs are attributed to the request with their level")
+        def _():
+            status, _ = runtime.request("/log", "inv-log", 1)
+            check(status == 200, "status %r" % status)
+            runtime.wait_for_end("inv-log", 1)
+            logs = runtime.logs_for("inv-log", 1)
+            matching = [log for log in logs if "hello from swift-log" in log[1]]
+            check(matching, "no IPC log for the request, got %r" % logs)
+            check(matching[0][0] == "warn", "expected level warn, got %r" % matching[0][0])
+            check("route=log" in matching[0][1], "metadata missing: %r" % matching[0][1])
+            check(not any("hello from swift-log" in line for line in runtime.stdout_lines),
+                  "request log was also written to stdout")
 
-    @test("waitUntil responds immediately and delays end")
-    def _():
-        started = time.monotonic()
-        status, body = runtime.request("/wait-until/700", "inv-wait", 1)
-        responded = time.monotonic()
-        check(status == 200 and body == b"scheduled\n", "status %r body %r" % (status, body))
-        check(responded - started < 0.5, "response waited for background work (%.2fs)" % (responded - started))
-        runtime.wait_for_end("inv-wait", 1, timeout=5)
-        with runtime.lock:
-            ended = runtime.end_times[("inv-wait", 1)]
-        check(ended - started >= 0.65, "end sent before background work finished (%.2fs)" % (ended - started))
-        done = [log for log in runtime.logs_for("inv-wait", 1) if "background work done" in log[1]]
-        check(done, "background log missing or not attributed to the request")
-        check(done[0][2] <= ended, "background log arrived after end")
+        @test("waitUntil responds immediately and delays end")
+        def _():
+            started = time.monotonic()
+            status, body = runtime.request("/wait-until/700", "inv-wait", 1)
+            responded = time.monotonic()
+            check(status == 200 and body == b"scheduled\n", "status %r body %r" % (status, body))
+            check(responded - started < 0.5, "response waited for background work (%.2fs)" % (responded - started))
+            runtime.wait_for_end("inv-wait", 1, timeout=5)
+            with runtime.lock:
+                ended = runtime.end_times[("inv-wait", 1)]
+            check(ended - started >= 0.65, "end sent before background work finished (%.2fs)" % (ended - started))
+            done = [log for log in runtime.logs_for("inv-wait", 1) if "background work done" in log[1]]
+            check(done, "background log missing or not attributed to the request")
+            check(done[0][2] <= ended, "background log arrived after end")
 
-    @test("approaching-timeout cancels waitUntil work and sends end")
-    def _():
-        started = time.monotonic()
-        status, _ = runtime.request("/wait-until/60000", "inv-timeout", 1)
-        check(status == 200, "status %r" % status)
-        time.sleep(0.2)
-        with runtime.lock:
-            check(("inv-timeout", 1) not in runtime.ends, "end sent while background work was running")
-        runtime.send({"type": "approaching-timeout", "context": {"invocationId": "inv-timeout", "requestId": 1}})
-        runtime.wait_for_end("inv-timeout", 1, timeout=3)
-        check(time.monotonic() - started < 5, "cancellation took too long")
-        cancelled = [log for log in runtime.logs_for("inv-timeout", 1) if "background work cancelled" in log[1]]
-        check(cancelled, "background work was not cancelled")
+        @test("approaching-timeout cancels waitUntil work and sends end")
+        def _():
+            started = time.monotonic()
+            status, _ = runtime.request("/wait-until/60000", "inv-timeout", 1)
+            check(status == 200, "status %r" % status)
+            time.sleep(0.2)
+            with runtime.lock:
+                check(("inv-timeout", 1) not in runtime.ends, "end sent while background work was running")
+            runtime.send({"type": "approaching-timeout", "context": {"invocationId": "inv-timeout", "requestId": 1}})
+            runtime.wait_for_end("inv-timeout", 1, timeout=3)
+            check(time.monotonic() - started < 5, "cancellation took too long")
+            cancelled = [log for log in runtime.logs_for("inv-timeout", 1) if "background work cancelled" in log[1]]
+            check(cancelled, "background work was not cancelled")
 
     @test("cron route requires CRON_SECRET")
     def _():
@@ -449,32 +498,33 @@ def main():
         for request_id in (1, 2, 3):
             runtime.wait_for_end("inv-cron", request_id)
 
-    @test("request helpers: geolocation, IP, request id, environment")
-    def _():
-        status, body = runtime.request("/geo", "inv-geo", 1, {
-            "x-vercel-ip-city": "S%C3%A3o%20Paulo",
-            "x-vercel-ip-country": "BR",
-            "x-vercel-ip-country-region": "SP",
-            "x-vercel-ip-latitude": "-23.5",
-            "x-vercel-ip-longitude": "-46.6",
-            "x-vercel-ip-postal-code": "01000",
-            "x-vercel-id": "gru1::iad1::abc",
-            "x-real-ip": "203.0.113.7",
-        })
-        check(status == 200, "status %r" % status)
-        payload = json.loads(body)
-        geo = payload.get("geolocation", {})
-        expected = {
-            "city": u"S\u00e3o Paulo", "country": "BR", "flag": u"\U0001F1E7\U0001F1F7",
-            "countryRegion": "SP", "region": "gru1", "latitude": "-23.5", "longitude": "-46.6",
-            "postalCode": "01000",
-        }
-        check(geo == expected, "geolocation %r" % geo)
-        check(payload.get("ipAddress") == "203.0.113.7", "ip %r" % payload.get("ipAddress"))
-        check(payload.get("id") == "gru1::iad1::abc", "id %r" % payload.get("id"))
-        check(payload.get("environment") == "preview", "environment %r" % payload.get("environment"))
-        check(payload.get("region") == "dev1", "region %r" % payload.get("region"))
-        runtime.wait_for_end("inv-geo", 1)
+    if not minimal:
+        @test("request helpers: geolocation, IP, request id, environment")
+        def _():
+            status, body = runtime.request("/geo", "inv-geo", 1, {
+                "x-vercel-ip-city": "S%C3%A3o%20Paulo",
+                "x-vercel-ip-country": "BR",
+                "x-vercel-ip-country-region": "SP",
+                "x-vercel-ip-latitude": "-23.5",
+                "x-vercel-ip-longitude": "-46.6",
+                "x-vercel-ip-postal-code": "01000",
+                "x-vercel-id": "gru1::iad1::abc",
+                "x-real-ip": "203.0.113.7",
+            })
+            check(status == 200, "status %r" % status)
+            payload = json.loads(body)
+            geo = payload.get("geolocation", {})
+            expected = {
+                "city": u"S\u00e3o Paulo", "country": "BR", "flag": u"\U0001F1E7\U0001F1F7",
+                "countryRegion": "SP", "region": "gru1", "latitude": "-23.5", "longitude": "-46.6",
+                "postalCode": "01000",
+            }
+            check(geo == expected, "geolocation %r" % geo)
+            check(payload.get("ipAddress") == "203.0.113.7", "ip %r" % payload.get("ipAddress"))
+            check(payload.get("id") == "gru1::iad1::abc", "id %r" % payload.get("id"))
+            check(payload.get("environment") == "preview", "environment %r" % payload.get("environment"))
+            check(payload.get("region") == "dev1", "region %r" % payload.get("region"))
+            runtime.wait_for_end("inv-geo", 1)
 
     def internal_headers(invocation_id, request_id):
         return {
@@ -503,7 +553,7 @@ def main():
                 check(runtime.ends[("inv-ws", 1)] == 1, "closing the socket sent another end")
 
         # hummingbird-websocket answers a declined upgrade itself (400) without running the HTTP
-        # responder, so the adapter must still end the invocation, exactly once.
+        # responder; the bootstrap must still end the invocation, exactly once.
         @test("WebSocket: declined upgrade still sends exactly one end")
         def _():
             ws = WebSocketClient(runtime.port, "/hello/upgrade", internal_headers("inv-ws", 2))
@@ -552,6 +602,16 @@ def main():
     def _():
         code = runtime.stop()
         check(code == 0, "exit code %r" % code)
+
+    @test("an app that crashes is reported as an unrecoverable error")
+    def _():
+        crashing = Runtime(arguments[0], name="crash")
+        crashing.start()
+        os.kill(crashing.app_pid(), signal.SIGKILL)
+        message = crashing.wait_for_message("unrecoverable-error")
+        check("exited unexpectedly" in message["payload"]["message"], "message %r" % message)
+        code = crashing.process.wait(timeout=5)
+        check(code == 128 + signal.SIGKILL, "exit code %r" % code)
 
     failed = [name for name, error in results if error]
     print("\n%d passed, %d failed" % (len(results) - len(failed), len(failed)))
