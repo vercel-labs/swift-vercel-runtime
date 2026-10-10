@@ -15,11 +15,28 @@ import Logging
 /// development) it writes a line to standard output, or standard error for `error` and above,
 /// which Vercel also collects.
 ///
-/// Install it once, before creating your application:
+/// It is optional: without it, logs still reach Vercel through standard output and error, just not
+/// tied to a request. Install it once, before creating your application:
 ///
 /// ```swift
 /// VercelLogHandler.bootstrap()
 /// ```
+///
+/// swift-log can only be bootstrapped once per process. If your app already calls
+/// `LoggingSystem.bootstrap`, add this handler to that call with `MultiplexLogHandler` instead of
+/// calling ``bootstrap(logLevel:metadataProvider:)`` too:
+///
+/// ```swift
+/// LoggingSystem.bootstrap { label in
+///     MultiplexLogHandler([
+///         VercelLogHandler(label: label),
+///         MyServiceLogHandler(label: label),
+///     ])
+/// }
+/// ```
+///
+/// It writes to standard output itself outside requests, so use it instead of swift-log's
+/// `StreamLogHandler`, not alongside it.
 public struct VercelLogHandler: LogHandler {
     public var metadata: Logger.Metadata = [:]
     public var metadataProvider: Logger.MetadataProvider?
@@ -39,7 +56,9 @@ public struct VercelLogHandler: LogHandler {
     /// Installs `VercelLogHandler` as the process-wide swift-log backend.
     ///
     /// swift-log can only be bootstrapped once per process, so call this at most once, at the very
-    /// start of `main`. The level defaults to the `LOG_LEVEL` environment variable, or `info`.
+    /// start of `main`, and not if your app calls `LoggingSystem.bootstrap` itself (combine the
+    /// handlers with `MultiplexLogHandler` there instead). The level defaults to the `LOG_LEVEL`
+    /// environment variable, or `info`.
     public static func bootstrap(logLevel: Logger.Level? = nil, metadataProvider: Logger.MetadataProvider? = nil) {
         LoggingSystem.bootstrap({ label, provider in
             VercelLogHandler(label: label, logLevel: logLevel, metadataProvider: provider)

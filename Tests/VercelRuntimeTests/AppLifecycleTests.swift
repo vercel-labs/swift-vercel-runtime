@@ -110,6 +110,25 @@ import Testing
         #expect(try await socket.nextFrame() == releaseFrame)
     }
 
+    /// The README's way to add VercelLogHandler to an existing logging setup.
+    @Test func combinesWithOtherBackends() async throws {
+        let socket = try TestSocket()
+        let client = try await connect(socket)
+        let other = RecordingLogHandler()
+        let logger = Logger(label: "test") { label in
+            MultiplexLogHandler([VercelLogHandler(label: label), other])
+        }
+
+        Vercel.$currentScope.withValue(client.scope(for: "7")) {
+            logger.error("both backends")
+        }
+        socket.send(#"{"type":"response-finished","token":"7"}"#)
+
+        #expect(try await socket.nextFrame() == #"{"type":"log","token":"7","level":"error","message":"both backends"}"#)
+        #expect(try await socket.nextFrame() == releaseFrame)
+        #expect(other.messages == ["both backends"])
+    }
+
     @Test func withoutTheBootstrapEverythingRunsPlainly() async throws {
         // No VERCEL_BOOTSTRAP_SOCKET in the test environment.
         #expect(!Vercel.isRunningOnVercel)
@@ -144,4 +163,22 @@ import Testing
         #expect(AppMessage(frame: Array(#"{"type":"log","token":"1","level":"loud","message":"x"}"#.utf8)) == nil)
         #expect(BootstrapMessage(frame: Array("not json".utf8)) == nil)
     }
+}
+
+/// Stands in for another swift-log backend, like a log service.
+final class RecordingLogHandler: LogHandler, @unchecked Sendable {
+    private let recorded = Mutex<[String]>([])
+    var metadata: Logger.Metadata = [:]
+    var logLevel: Logger.Level = .trace
+
+    subscript(metadataKey key: String) -> Logger.Metadata.Value? {
+        get { metadata[key] }
+        set { metadata[key] = newValue }
+    }
+
+    func log(event: LogEvent) {
+        recorded.withLock { $0.append(event.message.description) }
+    }
+
+    var messages: [String] { recorded.withLock { $0 } }
 }

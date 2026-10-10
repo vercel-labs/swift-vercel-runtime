@@ -202,38 +202,63 @@ everywhere. Apps only connect to the bootstrap the first time they use `Vercel.w
 
 ### Logs
 
-```swift
-VercelLogHandler.bootstrap()  // once, at the start of main
-```
+Logging works with no setup: everything your app writes to stdout and stderr, with `print` or any
+swift-log backend, shows up in Vercel's logs. Those lines are not tied to a request, though, which
+makes them hard to follow when one instance serves many requests at once.
 
-A swift-log backend. Everything your app writes to stdout and stderr already shows up in Vercel's
-logs, but not tied to a request, which makes them hard to follow when one instance serves many
-requests at once. With `VercelLogHandler`, logs written inside `Vercel.withRequest` are attributed
-to their request with their level. Wrap your handlers with a middleware:
+To group logs by request, use `VercelLogHandler`, a swift-log backend. Inside `Vercel.withRequest`
+it sends each log to Vercel with its level and the request it belongs to; everywhere else (startup,
+background tasks, local development) it writes a line to stdout, or stderr for `error` and above.
+The level defaults to `LOG_LEVEL`, or `info`. It takes two steps.
 
-```swift
-import VercelRuntime
+1. Install it as your swift-log backend. swift-log allows this exactly once per process, at the
+   start of `main`:
 
-// Hummingbird
-struct VercelRequestMiddleware<Context: RequestContext>: RouterMiddleware {
-    func handle(_ request: Request, context: Context, next: (Request, Context) async throws -> Response) async throws -> Response {
-        try await Vercel.withRequest(request.headers) { try await next(request, context) }
-    }
-}
-router.add(middleware: VercelRequestMiddleware())
+   ```swift
+   VercelLogHandler.bootstrap()
+   ```
 
-// Vapor
-struct VercelRequestMiddleware: Middleware {
-    func respond(to request: Request, chainingTo next: any Responder) async throws -> Response {
-        try await Vercel.withRequest(request.headers) { try await next.respond(to: request) }
-    }
-}
-app.middleware.use(VercelRequestMiddleware())
-```
+   If your app already calls `LoggingSystem.bootstrap` (many app templates do), do not call both:
+   swift-log stops the process on a second call. Add `VercelLogHandler` to your existing setup
+   instead, with `MultiplexLogHandler`:
 
-`withRequest` takes the request's `HTTPFields`, so it works the same with any framework built on
-swift-http-types. Outside a request the handler writes a line to stdout (stderr for `error` and
-above). The level defaults to `LOG_LEVEL`, or `info`.
+   ```swift
+   LoggingSystem.bootstrap { label in
+       MultiplexLogHandler([
+           VercelLogHandler(label: label),
+           MyServiceLogHandler(label: label),  // your existing backend, for example a log service
+       ])
+   }
+   ```
+
+   `VercelLogHandler` already writes to stdout outside requests, so it replaces swift-log's
+   default `StreamLogHandler`. Combining the two prints every line twice.
+
+2. Run your handlers inside `Vercel.withRequest`, typically from a middleware:
+
+   ```swift
+   import VercelRuntime
+
+   // Hummingbird
+   struct VercelRequestMiddleware<Context: RequestContext>: RouterMiddleware {
+       func handle(_ request: Request, context: Context, next: (Request, Context) async throws -> Response) async throws -> Response {
+           try await Vercel.withRequest(request.headers) { try await next(request, context) }
+       }
+   }
+   router.add(middleware: VercelRequestMiddleware())
+
+   // Vapor
+   struct VercelRequestMiddleware: Middleware {
+       func respond(to request: Request, chainingTo next: any Responder) async throws -> Response {
+           try await Vercel.withRequest(request.headers) { try await next.respond(to: request) }
+       }
+   }
+   app.middleware.use(VercelRequestMiddleware())
+   ```
+
+   `withRequest` takes the request's `HTTPFields`, so it works the same with any framework built on
+   swift-http-types. Logs from code that runs after the handler returns, like a streamed response
+   body or a WebSocket, are not attributed.
 
 ### waitUntil
 

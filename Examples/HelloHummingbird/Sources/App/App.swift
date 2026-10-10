@@ -11,7 +11,9 @@ import VercelRuntime
 @main
 struct App {
     static func main() async throws {
-        // Attributes logs to the request that produced them in Vercel's logs.
+        // Optional: groups logs by request in Vercel's logs (with the middleware below). Logs reach
+        // Vercel without it too. If you already call LoggingSystem.bootstrap, add VercelLogHandler
+        // there with MultiplexLogHandler instead.
         VercelLogHandler.bootstrap()
 
         let router = Router()
