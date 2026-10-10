@@ -5,7 +5,7 @@ import Foundation
 #endif
 import VercelRuntime
 
-/// `vercel-bootstrap.json`, written by the `vercel-build` plugin next to the bootstrap binary.
+/// `vercel-bootstrap.json`, written by the `vercel` plugin next to the bootstrap binary.
 ///
 /// ```json
 /// { "executable": "App", "crons": ["/cron/cleanup"] }
@@ -34,7 +34,7 @@ package struct BootstrapConfiguration: Sendable, Equatable {
     package static func load(directory: String) throws -> BootstrapConfiguration {
         let path = directory + "/" + fileName
         guard let contents = readFile(path) else {
-            throw BootstrapError("cannot read \(path). Build the function with `swift package vercel-build`.")
+            throw BootstrapError("cannot read \(path). Build the function with `swift package vercel`.")
         }
         return try BootstrapConfiguration(json: contents)
     }

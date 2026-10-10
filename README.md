@@ -9,7 +9,7 @@ responses, WebSockets and concurrent requests included.
 
 | Product | Use it for |
 | --- | --- |
-| `VercelBuildPlugin` | `swift package vercel-build`: builds `.vercel/output` for `vercel deploy --prebuilt` |
+| `VercelPlugin` | `swift package vercel`: builds `.vercel/output` for `vercel deploy --prebuilt` |
 | `VercelRuntime` | Optional: per-request logs, `waitUntil`, request helpers (geolocation, IP, OIDC), environment |
 | `VercelBootstrap` | The function's entrypoint. Built and deployed by the plugin; you never import it |
 
@@ -87,8 +87,8 @@ let package = Package(
     platforms: [.macOS(.v15)],
     dependencies: [
         .package(url: "https://github.com/hummingbird-project/hummingbird.git", from: "2.27.0"),
-        // Provides `swift package vercel-build`. Nothing to import.
-        .package(url: "https://github.com/vercel-labs/swift-vercel-runtime.git", from: "0.2.0"),
+        // Provides `swift package vercel`. Nothing to import.
+        .package(url: "https://github.com/vercel-labs/swift-vercel-runtime.git", from: "0.3.0"),
     ],
     targets: [
         .executableTarget(name: "hello", dependencies: [
@@ -119,9 +119,9 @@ swift run   # http://localhost:8080
 ### 5. Deploy
 
 ```sh
-swift package --disable-sandbox vercel-build   # cross-compiles and writes .vercel/output
-vercel link                                    # once: create or pick a Vercel project
-vercel deploy --prebuilt                       # preview deployment; add --prod for production
+swift package --disable-sandbox vercel   # cross-compiles and writes .vercel/output
+vercel link                              # once: create or pick a Vercel project
+vercel deploy --prebuilt                 # preview deployment; add --prod for production
 ```
 
 - The first build downloads and compiles dependencies, which takes a minute or two; later builds
@@ -144,7 +144,7 @@ dependencies: [
     .package(url: "https://github.com/vapor/vapor.git", from: "5.0.0-beta.3"),
     // Needed until swift-http-server tags a release with its musl fix (see Known issues).
     .package(url: "https://github.com/swift-server/swift-http-server.git", revision: "09ee2e3682248532c43975b1af5938628efb7ba8"),
-    .package(url: "https://github.com/vercel-labs/swift-vercel-runtime.git", from: "0.2.0"),
+    .package(url: "https://github.com/vercel-labs/swift-vercel-runtime.git", from: "0.3.0"),
 ],
 targets: [
     .executableTarget(name: "App", dependencies: [
@@ -276,7 +276,7 @@ request.
 
 ### Cron jobs
 
-Declare crons in `vercel.json` next to `Package.swift`; `vercel-build` copies them into the
+Declare crons in `vercel.json` next to `Package.swift`; `swift package vercel` copies them into the
 deployment:
 
 ```json
@@ -336,7 +336,7 @@ Vapor 5 does not support WebSockets yet (they are disabled in the 5.0 betas).
 ## Build options
 
 ```sh
-swift package --disable-sandbox vercel-build
+swift package --disable-sandbox vercel
 vercel deploy --prebuilt
 ```
 

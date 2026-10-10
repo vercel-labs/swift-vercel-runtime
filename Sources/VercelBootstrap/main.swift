@@ -7,5 +7,5 @@ import Musl
 #endif
 import VercelBootstrapCore
 
-// The entrypoint of every Swift function deployed with `vercel-build`. See `Bootstrap`.
+// The entrypoint of every Swift function deployed with `swift package vercel`. See `Bootstrap`.
 exit(await Bootstrap.run())

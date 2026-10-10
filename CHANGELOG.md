@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.0
+
+### Breaking changes
+
+- The build command is now `swift package --disable-sandbox vercel` (was `vercel-build`). Options
+  are unchanged.
+- The plugin product and target are now `VercelPlugin` (were `VercelBuildPlugin`). Apps do not
+  reference plugin products, so only scripts that invoke the command change.
+
 ## 0.2.0
 
 Any Swift server that listens on a port now runs on Vercel unchanged, with no framework adapters.

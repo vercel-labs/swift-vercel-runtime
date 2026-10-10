@@ -2,7 +2,7 @@
 import PackageDescription
 
 // A plain SwiftNIO HTTP server with no Vercel code at all: the package only depends on
-// swift-vercel-runtime for `swift package vercel-build`.
+// swift-vercel-runtime for `swift package vercel`.
 let package = Package(
     name: "NIOExample",
     platforms: [
@@ -12,7 +12,7 @@ let package = Package(
         .executable(name: "NIOApp", targets: ["App"]),
     ],
     dependencies: [
-        // In your app: .package(url: "https://github.com/vercel-labs/swift-vercel-runtime.git", from: "0.2.0")
+        // In your app: .package(url: "https://github.com/vercel-labs/swift-vercel-runtime.git", from: "0.3.0")
         .package(name: "swift-vercel-runtime", path: "../.."),
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.100.0"),
     ],
