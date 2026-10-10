@@ -41,8 +41,6 @@ public struct VercelLogHandler: LogHandler {
     /// swift-log can only be bootstrapped once per process, so call this at most once, at the very
     /// start of `main`. The level defaults to the `LOG_LEVEL` environment variable, or `info`.
     public static func bootstrap(logLevel: Logger.Level? = nil, metadataProvider: Logger.MetadataProvider? = nil) {
-        // Connect to the bootstrap now rather than inside the first request.
-        _ = BootstrapClient.shared
         LoggingSystem.bootstrap({ label, provider in
             VercelLogHandler(label: label, logLevel: logLevel, metadataProvider: provider)
         }, metadataProvider: metadataProvider)

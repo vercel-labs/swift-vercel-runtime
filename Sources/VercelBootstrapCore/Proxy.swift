@@ -176,7 +176,7 @@ final class ProxyHandler: ChannelDuplexHandler, RemovableChannelHandler {
             forwarded[.bootstrapRequest] = token
         }
 
-        if configuration.bootstrap.isCronPath(path), let secret = configuration.cronSecret, !secret.isEmpty,
+        if configuration.bootstrap.isCronPath(head.uri), let secret = configuration.cronSecret, !secret.isEmpty,
             !VercelCron.isAuthorized(fields, secret: secret)
         {
             self.exchange = exchange

@@ -180,14 +180,25 @@ dependency besides the build plugin.
 
 ## Optional Vercel features
 
-Add the `VercelRuntime` product for these:
+You do not need `VercelRuntime` to run on Vercel: without it your app gets routing, streaming,
+WebSockets, cron protection and graceful shutdown, and everything it prints reaches Vercel's logs.
+Add it for features that need to know which request your code is running for:
 
 ```swift
 .product(name: "VercelRuntime", package: "swift-vercel-runtime"),
 ```
 
+| Feature | API | Needs `Vercel.withRequest`? |
+| --- | --- | --- |
+| Logs attributed to their request, with levels | `VercelLogHandler` | Yes |
+| Background work after the response | `Vercel.waitUntil(for: request.headers)` | No |
+| | `Vercel.waitUntil { }` | Yes |
+| Geolocation, IP, request id, OIDC token | `request.headers.vercel` | No |
+| Deployment environment | `VercelEnvironment.current` | No |
+
 Everything below is a no-op or falls back to plain behavior locally, so the same code runs
-everywhere.
+everywhere. Apps only connect to the bootstrap the first time they use `Vercel.withRequest` or
+`Vercel.waitUntil(for:)`; until then, requests end as soon as their response is done.
 
 ### Logs
 
@@ -196,9 +207,9 @@ VercelLogHandler.bootstrap()  // once, at the start of main
 ```
 
 A swift-log backend. Everything your app writes to stdout and stderr already shows up in Vercel's
-logs. With `VercelLogHandler`, logs written while handling a request are also attributed to that
-request with their level, even with many concurrent requests. Run your handlers inside
-`Vercel.withRequest`, typically from a middleware:
+logs, but not tied to a request, which makes them hard to follow when one instance serves many
+requests at once. With `VercelLogHandler`, logs written inside `Vercel.withRequest` are attributed
+to their request with their level. Wrap your handlers with a middleware:
 
 ```swift
 import VercelRuntime

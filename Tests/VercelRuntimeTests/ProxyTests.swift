@@ -130,6 +130,11 @@ import Testing
             "GET /cron HTTP/1.1\r\nHost: x\r\nConnection: close\r\nAuthorization: Bearer secret\r\n\(internalHeaders(2))\r\n"
         )
         #expect(allowed.hasPrefix("HTTP/1.1 200 OK\r\n"))
+        // Spellings routers resolve to the same route.
+        for target in ["//cron", "/cron//", "/%63ron"] {
+            let bypass = try await RawClient.exchange(port: harness.port, "GET \(target) HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+            #expect(bypass.hasPrefix("HTTP/1.1 401 Unauthorized\r\n"), "\(target) was not checked")
+        }
         try await waitUntil { Set(ends(harness)) == [1, 2] }
         try await harness.close()
     }

@@ -133,6 +133,24 @@ final class Recorder: AppPeer, @unchecked Sendable {
         #expect(!configuration.isCronPath("/"))
     }
 
+    /// Every spelling a router may resolve to the cron route must be checked too.
+    @Test(arguments: [
+        "//cron", "/cron//", "///cron///", "/%63ron", "/%2Fcron", "/CRON", "/cron#x",
+        "http://example.com/cron", "https://example.com//cron?x=1",
+    ])
+    func cronPathSpellings(target: String) {
+        let configuration = BootstrapConfiguration(executable: "App", cronPaths: ["/cron"])
+        #expect(configuration.isCronPath(target))
+    }
+
+    @Test func cronMatchKeys() {
+        #expect(cronMatchKey("/") == "/")
+        #expect(cronMatchKey("") == "/")
+        #expect(cronMatchKey("/api//Jobs/%41/") == "/api/jobs/a")
+        #expect(cronMatchKey("http://host") == "/")
+        #expect(cronMatchKey("/bad%zz") == "/bad%zz")
+    }
+
     @Test func rejectsPathsAsExecutable() {
         #expect(throws: BootstrapError.self) {
             try BootstrapConfiguration(json: Array(#"{"executable":"../App"}"#.utf8))

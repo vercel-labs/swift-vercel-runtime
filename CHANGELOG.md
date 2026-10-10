@@ -18,7 +18,8 @@ This is how Vercel runs standalone Go servers.
 - `VercelRuntime` is now optional and framework-agnostic. Per-request logs and `waitUntil` take the
   request's `HTTPFields`: `Vercel.withRequest(request.headers) { ... }` (typically from a
   five-line middleware) and `Vercel.waitUntil(for: request.headers) { ... }`. They talk to the
-  bootstrap over `VERCEL_BOOTSTRAP_SOCKET`. Request helpers are `request.headers.vercel`.
+  bootstrap over `VERCEL_BOOTSTRAP_SOCKET`, connecting on first use. Request helpers are
+  `request.headers.vercel`.
 - The package now requires macOS 15 instead of macOS 26.2 (Vapor 5 still requires macOS 26.2).
 
 ### Breaking changes

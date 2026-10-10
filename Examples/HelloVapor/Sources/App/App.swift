@@ -14,8 +14,20 @@ struct App {
         VercelLogHandler.bootstrap()
 
         let app = try Application()
+        // Runs every route as part of its Vercel request (logs and waitUntil). See below.
+        app.middleware.use(VercelRequestMiddleware())
         try routes(app)
         try await app.start()
+    }
+}
+
+/// Runs each request inside `Vercel.withRequest`, so `VercelLogHandler` attributes its logs to it
+/// and `Vercel.waitUntil` keeps the function alive for its background work. Locally it does nothing.
+struct VercelRequestMiddleware: Middleware {
+    func respond(to request: Request, chainingTo next: any Responder) async throws -> Response {
+        try await Vercel.withRequest(request.headers) {
+            try await next.respond(to: request)
+        }
     }
 }
 
@@ -77,17 +89,15 @@ func routes(_ app: Application) throws {
     }
 
     // Shows up under this request in Vercel's logs, with the warning level.
-    app.get("log") { req in
-        await Vercel.withRequest(req.headers) {
-            logger.warning("hello from swift-log", metadata: ["route": "log"])
-        }
+    app.get("log") { _ in
+        logger.warning("hello from swift-log", metadata: ["route": "log"])
         return "logged\n"
     }
 
     // Responds immediately; the function keeps running until the background work is done.
     app.get("wait-until", ":ms") { req in
         let milliseconds = try req.parameters.require("ms", as: Int.self)
-        Vercel.waitUntil(for: req.headers) {
+        Vercel.waitUntil {
             do {
                 try await Task.sleep(for: .milliseconds(milliseconds))
                 logger.info("background work done")

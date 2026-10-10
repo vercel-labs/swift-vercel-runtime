@@ -12,9 +12,11 @@ public enum Vercel {
 
     /// Runs `body` as part of the request with these headers.
     ///
-    /// While `body` runs, ``VercelLogHandler`` attributes logs to the request in Vercel's logs and
-    /// ``waitUntil(_:)`` keeps the function alive for background work. Call it from a middleware
-    /// to cover every route:
+    /// Optional. While `body` runs, ``VercelLogHandler`` attributes logs to the request in Vercel's
+    /// logs (with their level, even with many concurrent requests) and ``waitUntil(_:)`` keeps the
+    /// function alive for background work. Without it, logs still reach Vercel through standard
+    /// output and error, just not tied to a request, and ``waitUntil(for:_:)`` still works. Call it
+    /// from a middleware to cover every route:
     ///
     /// ```swift
     /// // Vapor
@@ -73,9 +75,11 @@ public enum Vercel {
         }
     }
 
-    /// Whether the app is connected to `VercelBootstrap`, which means it is running on Vercel.
+    /// Whether the app was started by `VercelBootstrap`, which means it is running on Vercel.
     public static var isRunningOnVercel: Bool {
-        BootstrapClient.shared != nil
+        // Checked without connecting: connecting makes the bootstrap wait for this app on every
+        // request.
+        environmentValue(BootstrapProtocol.socketVariable).map { !$0.isEmpty } ?? false
     }
 
     private static func scope(for headers: HTTPFields) -> RequestScope? {

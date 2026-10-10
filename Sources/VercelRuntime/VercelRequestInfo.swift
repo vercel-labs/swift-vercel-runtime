@@ -116,7 +116,7 @@ func flagEmoji(_ countryCode: String) -> String? {
 
 /// Decodes `%XX` escapes as UTF-8, like JavaScript's `decodeURIComponent`. Returns the input
 /// unchanged if it is malformed.
-func percentDecoded(_ value: String) -> String {
+package func percentDecoded(_ value: String) -> String {
     // A byte search on purpose: `String.contains(_: String)` resolves to Foundation's
     // NSString API here, which would link all of Foundation and ICU (~40 MB) into static binaries.
     guard value.utf8.contains(UInt8(ascii: "%")) else { return value }

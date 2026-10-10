@@ -10,9 +10,11 @@ import Synchronization
 
 /// The app's connection to `VercelBootstrap`, which runs it on Vercel.
 ///
-/// Only apps that use ``Vercel/withRequest(_:_:)``, ``Vercel/waitUntil(for:_:)`` or
-/// ``VercelLogHandler`` connect. Locally, or when the app runs outside the bootstrap, there is no
-/// client and those APIs fall back to plain behavior.
+/// Connected on first use of a request scope (``Vercel/withRequest(_:_:)`` or
+/// ``Vercel/waitUntil(for:_:)``), so apps that never use one never connect and the bootstrap ends
+/// their requests as soon as the response is done. Connecting waits for the bootstrap's `ready`,
+/// so connecting lazily inside the first request is safe. Locally, or when the app runs outside the
+/// bootstrap, there is no client and those APIs fall back to plain behavior.
 final class BootstrapClient: Sendable {
     /// The process-wide client, connected on first access. `nil` outside the bootstrap.
     static let shared: BootstrapClient? = {
