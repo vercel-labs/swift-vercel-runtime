@@ -1,4 +1,4 @@
-public import HTTPTypes
+package import HTTPTypes
 
 extension HTTPFields {
     /// Removes the headers the Vercel functions runtime adds for itself and returns the
@@ -13,7 +13,7 @@ extension HTTPFields {
     ///
     /// Returns `nil` when the request carries no invocation id, which means it did not come
     /// through the Vercel functions runtime.
-    public mutating func removeVercelInternalFields() -> InvocationContext? {
+    package mutating func removeVercelInternalFields() -> InvocationContext? {
         var invocationID: String?
         var requestID: String?
         var oidcToken: String?
@@ -58,5 +58,35 @@ extension HTTPFields {
             self = kept
         }
         return InvocationContext(invocationID: invocationID, requestID: requestID)
+    }
+}
+
+/// Header names used by the Vercel functions runtime.
+package enum VercelHeader {
+    package static let internalPrefix = "x-vercel-internal-"
+    package static let invocationID = "x-vercel-internal-invocation-id"
+    package static let requestID = "x-vercel-internal-request-id"
+    package static let internalOIDCToken = "x-vercel-internal-oidc-token"
+    /// Public OIDC header exposed to user code, derived from the internal one.
+    package static let oidcToken = "x-vercel-oidc-token"
+
+    /// Runtime cache configuration headers. `x-vercel-sc-runtime-cache` is always removed; the
+    /// others are removed when the proxy sets ``runtimeCacheNoHeaderLeak``.
+    package static let runtimeCache = "x-vercel-sc-runtime-cache"
+    package static let runtimeCacheNoHeaderLeak = "x-vercel-sc-no-header-leak"
+    package static let runtimeCacheConfiguration: Set<String> = [
+        "x-vercel-sc-headers",
+        "x-vercel-sc-host",
+        "x-vercel-sc-basepath",
+        "x-vercel-sc-protocol",
+        runtimeCacheNoHeaderLeak,
+    ]
+
+    /// The health check path. Answer with 200 and send no IPC messages.
+    package static let pingPath = "/_vercel/ping"
+
+    /// Whether a lowercased header name is internal and must not reach user code.
+    package static func isInternal(_ lowercasedName: String) -> Bool {
+        lowercasedName.hasPrefix(internalPrefix)
     }
 }

@@ -19,10 +19,10 @@ let package = Package(
         .executableTarget(
             name: "App",
             dependencies: [
-                .product(name: "VercelHummingbird", package: "swift-vercel-runtime"),
                 .product(name: "Hummingbird", package: "hummingbird"),
-                .product(name: "VercelHummingbirdWebSocket", package: "swift-vercel-runtime"),
                 .product(name: "HummingbirdWebSocket", package: "hummingbird-websocket"),
+                // Optional: per-request logs, waitUntil and request helpers.
+                .product(name: "VercelRuntime", package: "swift-vercel-runtime"),
             ]
         ),
     ]

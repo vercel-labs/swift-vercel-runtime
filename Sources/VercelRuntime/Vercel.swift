@@ -1,29 +1,49 @@
+public import HTTPTypes
 import Logging
 import Synchronization
 
-/// Per-request Vercel features available from anywhere in a request handler.
+/// Optional Vercel features for request handlers.
+///
+/// Your server does not need any of this to run on Vercel: `VercelBootstrap` already answers
+/// health checks, strips the runtime's internal headers and reports every request. Use these
+/// APIs for the features that need to know which request your code is running for.
 public enum Vercel {
     @TaskLocal static var currentScope: RequestScope?
 
-    /// The invocation the current task is handling, or `nil` outside a request or off Vercel.
-    public static var currentInvocation: InvocationContext? {
-        currentScope?.context
+    /// Runs `body` as part of the request with these headers.
+    ///
+    /// While `body` runs, ``VercelLogHandler`` attributes logs to the request in Vercel's logs and
+    /// ``waitUntil(_:)`` keeps the function alive for background work. Call it from a middleware
+    /// to cover every route:
+    ///
+    /// ```swift
+    /// // Vapor
+    /// struct VercelRequestMiddleware: Middleware {
+    ///     func respond(to request: Request, chainingTo next: any Responder) async throws -> Response {
+    ///         try await Vercel.withRequest(request.headers) { try await next.respond(to: request) }
+    ///     }
+    /// }
+    /// ```
+    ///
+    /// Locally, or for requests that did not come through Vercel, it just runs `body`.
+    public static func withRequest<T>(_ headers: HTTPFields, _ body: () async throws -> T) async rethrows -> T {
+        guard let scope = scope(for: headers) else {
+            return try await body()
+        }
+        return try await $currentScope.withValue(scope) {
+            try await body()
+        }
     }
 
     /// Keeps the function running until `operation` finishes, after the response is sent.
     ///
     /// Use it for work that should not delay the response, like analytics, cache warming or
-    /// webhooks. On Vercel the request's `end` is only reported once every `waitUntil` operation
-    /// has completed, so the instance is not frozen mid-work. Operations are cancelled when the
+    /// webhooks. The request is only reported finished once every `waitUntil` operation has
+    /// completed, so the instance is not frozen mid-work. Operations are cancelled when the
     /// request approaches its maximum duration, so check `Task.isCancelled` in long work.
     ///
-    /// Outside a request, or when not running on Vercel, the operation simply runs in a new task.
-    ///
-    /// ```swift
-    /// Vercel.waitUntil {
-    ///     try await analytics.track("signup")
-    /// }
-    /// ```
+    /// Call it inside ``withRequest(_:_:)``, or use ``waitUntil(for:_:)``. Outside a request, or
+    /// when not running on Vercel, the operation simply runs in a new task.
     public static func waitUntil(_ operation: @escaping @Sendable () async throws -> Void) {
         if let scope = currentScope {
             scope.waitUntil(operation)
@@ -31,17 +51,51 @@ public enum Vercel {
             Task { await runReportingErrors(operation) }
         }
     }
+
+    /// Keeps the function running until `operation` finishes, after the response for the request
+    /// with these headers is sent. Works without ``withRequest(_:_:)``:
+    ///
+    /// ```swift
+    /// router.post("signup") { request, _ in
+    ///     Vercel.waitUntil(for: request.headers) {
+    ///         try await analytics.track("signup")
+    ///     }
+    ///     return "ok"
+    /// }
+    /// ```
+    public static func waitUntil(for headers: HTTPFields, _ operation: @escaping @Sendable () async throws -> Void) {
+        guard let scope = scope(for: headers) else {
+            waitUntil(operation)
+            return
+        }
+        $currentScope.withValue(scope) {
+            scope.waitUntil(operation)
+        }
+    }
+
+    /// Whether the app is connected to `VercelBootstrap`, which means it is running on Vercel.
+    public static var isRunningOnVercel: Bool {
+        BootstrapClient.shared != nil
+    }
+
+    private static func scope(for headers: HTTPFields) -> RequestScope? {
+        guard let name = HTTPField.Name(BootstrapProtocol.requestHeader),
+            let token = headers[name], !token.isEmpty,
+            let client = BootstrapClient.shared
+        else { return nil }
+        return client.scope(for: token)
+    }
 }
 
-/// The lifecycle of one request: its handler plus any `waitUntil` work. Sends `end` exactly once,
-/// when both are done.
+/// One request's `waitUntil` work. Releases the request back to the bootstrap exactly once, when
+/// its response has finished and all work is done.
 final class RequestScope: Sendable {
-    let context: InvocationContext
-    let runtime: VercelRuntime
+    let token: String
+    let client: BootstrapClient
 
     private struct State {
-        var handlerFinished = false
-        var ended = false
+        var responseFinished = false
+        var released = false
         var cancelled = false
         var pending = 0
         var nextID = 0
@@ -50,20 +104,20 @@ final class RequestScope: Sendable {
 
     private let state = Mutex(State())
 
-    init(context: InvocationContext, runtime: VercelRuntime) {
-        self.context = context
-        self.runtime = runtime
+    init(token: String, client: BootstrapClient) {
+        self.token = token
+        self.client = client
     }
 
     func waitUntil(_ operation: @escaping @Sendable () async throws -> Void) {
         let id: Int? = state.withLock { state in
-            guard !state.ended else { return nil }
+            guard !state.released else { return nil }
             state.pending += 1
             state.nextID += 1
             return state.nextID
         }
         guard let id else {
-            // The request already ended; nothing will wait for this work.
+            // The request already finished; nothing will wait for this work.
             Task { await runReportingErrors(operation) }
             return
         }
@@ -74,7 +128,7 @@ final class RequestScope: Sendable {
             self.taskFinished(id)
         }
         let cancelNow = state.withLock { state -> Bool in
-            if state.pending > 0, !state.ended {
+            if state.pending > 0, !state.released {
                 state.tasks[id] = task
             }
             return state.cancelled
@@ -84,17 +138,18 @@ final class RequestScope: Sendable {
         }
     }
 
-    func handlerFinished() {
-        let shouldEnd = state.withLock { state -> Bool in
-            state.handlerFinished = true
-            return Self.markEndedIfDone(&state)
+    /// The bootstrap finished sending the response.
+    func responseFinished() {
+        let release = state.withLock { state -> Bool in
+            state.responseFinished = true
+            return Self.markReleasedIfDone(&state)
         }
-        if shouldEnd {
-            runtime.scopeEnded(self)
+        if release {
+            client.released(self)
         }
     }
 
-    /// Cancels outstanding `waitUntil` work so `end` can be sent before the runtime times out.
+    /// Cancels outstanding `waitUntil` work so the request can end before the runtime times out.
     func cancelBackgroundWork() {
         let tasks = state.withLock { state -> [Task<Void, Never>] in
             state.cancelled = true
@@ -106,19 +161,19 @@ final class RequestScope: Sendable {
     }
 
     private func taskFinished(_ id: Int) {
-        let shouldEnd = state.withLock { state -> Bool in
+        let release = state.withLock { state -> Bool in
             state.tasks[id] = nil
             state.pending -= 1
-            return Self.markEndedIfDone(&state)
+            return Self.markReleasedIfDone(&state)
         }
-        if shouldEnd {
-            runtime.scopeEnded(self)
+        if release {
+            client.released(self)
         }
     }
 
-    private static func markEndedIfDone(_ state: inout State) -> Bool {
-        guard state.handlerFinished, state.pending == 0, !state.ended else { return false }
-        state.ended = true
+    private static func markReleasedIfDone(_ state: inout State) -> Bool {
+        guard state.responseFinished, state.pending == 0, !state.released else { return false }
+        state.released = true
         state.tasks = [:]
         return true
     }

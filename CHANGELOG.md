@@ -1,5 +1,37 @@
 # Changelog
 
+## 0.2.0
+
+Any Swift server that listens on a port now runs on Vercel unchanged, with no framework adapters.
+This is how Vercel runs standalone Go servers.
+
+- `VercelBootstrap` (new): the function's entrypoint. It starts your app with `PORT` set, finds
+  the port it listens on (from `/proc`, so apps that ignore `PORT` work too), and proxies requests
+  to it. It also implements the Vercel runtime protocol for the app: health checks, internal
+  header stripping, an `end` per request (and at `101` for WebSockets), streaming in both
+  directions with backpressure, WebSocket tunnels, `CRON_SECRET` enforcement on cron paths,
+  `SIGTERM` forwarding, and crash reporting. Built and deployed by `vercel-build`.
+- `VercelBuildPlugin`: builds both binaries and writes `vercel-bootstrap.json`; the function's
+  handler, `executable`, is now the bootstrap, like Vercel's Go builder. Executable products named
+  `executable` or `bootstrap` are rejected (AWS Lambda would run a file named `bootstrap` as its
+  runtime, bypassing Vercel's).
+- `VercelRuntime` is now optional and framework-agnostic. Per-request logs and `waitUntil` take the
+  request's `HTTPFields`: `Vercel.withRequest(request.headers) { ... }` (typically from a
+  five-line middleware) and `Vercel.waitUntil(for: request.headers) { ... }`. They talk to the
+  bootstrap over `VERCEL_BOOTSTRAP_SOCKET`. Request helpers are `request.headers.vercel`.
+- The package now requires macOS 15 instead of macOS 26.2 (Vapor 5 still requires macOS 26.2).
+
+### Breaking changes
+
+- Removed `VercelVapor`, `VercelHummingbird` and `VercelHummingbirdWebSocket`. Use
+  `Application()` / `Application(router:)` and `.http1WebSocketUpgrade` directly.
+- Removed `VercelCronMiddleware`: the bootstrap enforces `CRON_SECRET` on the cron paths from
+  `vercel.json`. `VercelCron.isAuthorized(_:secret:)` remains for other routes.
+- Removed the in-process runtime API (`VercelRuntime` class, `serverStarted`, `withRequest(_:)`
+  with an `InvocationContext`, `removeVercelInternalFields`): the bootstrap owns the runtime
+  protocol now.
+- `request.vercel` is now `request.headers.vercel`.
+
 ## 0.1.0
 
 First release. Run Swift servers natively on Vercel: apps are cross-compiled with the Swift Static

@@ -10,16 +10,17 @@ public import HTTPTypes
 /// ```
 ///
 /// Vercel calls the path with `GET`. When the project has a `CRON_SECRET` environment variable,
-/// it sends `Authorization: Bearer <CRON_SECRET>`; protect cron routes with the adapter's
-/// `VercelCronMiddleware` or ``isAuthorized(_:secret:)``.
+/// it sends `Authorization: Bearer <CRON_SECRET>`, and `VercelBootstrap` rejects requests to the
+/// cron paths without it before they reach your server. ``isAuthorized(_:secret:)`` is the same
+/// check, for routes you trigger some other way.
 public enum VercelCron {
     /// The JSON body of the `401` response for unauthorized cron requests.
     public static let unauthorizedBody = #"{"error":"unauthorized"}"#
 
     /// Whether a request may run a cron job.
     ///
-    /// Without a secret every request is allowed, matching Vercel's Python runtime; set
-    /// `CRON_SECRET` in the project to lock cron routes down.
+    /// Without a secret every request is allowed; set `CRON_SECRET` in the project to lock cron
+    /// routes down.
     public static func isAuthorized(_ headers: HTTPFields, secret: String? = VercelEnvironment.current.cronSecret) -> Bool {
         guard let secret, !secret.isEmpty else { return true }
         guard let authorization = headers[.authorization] else { return false }

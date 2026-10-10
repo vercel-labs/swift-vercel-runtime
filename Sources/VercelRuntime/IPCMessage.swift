@@ -8,39 +8,39 @@ import Foundation
 ///
 /// Comes from the `x-vercel-internal-invocation-id` and `x-vercel-internal-request-id` headers
 /// the Vercel functions runtime adds to every proxied request.
-public struct InvocationContext: Sendable, Hashable {
-    public var invocationID: String
+package struct InvocationContext: Sendable, Hashable {
+    package var invocationID: String
     /// The multiplexed (N1) request id. The runtime decodes it as a `u32`.
-    public var requestID: UInt32?
+    package var requestID: UInt32?
 
-    public init(invocationID: String, requestID: UInt32?) {
+    package init(invocationID: String, requestID: UInt32?) {
         self.invocationID = invocationID
         self.requestID = requestID
     }
 
     /// Builds a context from raw header values. Returns `nil` when there is no invocation id,
     /// which means the request did not come through the Vercel functions runtime.
-    public init?(invocationID: String?, requestID: String?) {
+    package init?(invocationID: String?, requestID: String?) {
         guard let invocationID, !invocationID.isEmpty else { return nil }
         self.invocationID = invocationID
         self.requestID = requestID.flatMap { UInt32($0.trimmingSpaces()) }
     }
 }
 
-/// Messages sent from a function process to the Vercel functions runtime.
+/// Messages sent from the function process (the bootstrap) to the Vercel functions runtime.
 ///
 /// Each message is a JSON object terminated by a NUL byte on the `VERCEL_IPC_PATH` socket. The
 /// runtime decodes them strictly (unknown types or wrongly typed fields are fatal), so this
 /// mirrors its schema exactly.
-public enum IPCMessage: Sendable, Equatable {
+package enum IPCMessage: Sendable, Equatable {
     /// Log levels accepted by the runtime for `log` messages.
-    public enum LogLevel: String, Sendable {
+    package enum LogLevel: String, Sendable {
         case trace, debug, info, warn, error, fatal
     }
 
     /// Must be the first message. Tells the runtime which local port to proxy requests to.
     case serverStarted(initDuration: UInt64, httpPort: UInt16)
-    /// Sent once per request after the handler and its `waitUntil` work finished. `error` must
+    /// Sent once per request after the response and its `waitUntil` work finished. `error` must
     /// be a string or `nil`.
     case end(InvocationContext, error: String? = nil)
     /// A log line attributed to a specific request. The message is base64 encoded on the wire.
@@ -49,7 +49,7 @@ public enum IPCMessage: Sendable, Equatable {
     case unrecoverableError(exitCode: Int32, message: String)
 
     /// The JSON encoding of the message, without the NUL terminator.
-    public var json: String {
+    package var json: String {
         switch self {
         case .serverStarted(let initDuration, let httpPort):
             return #"{"type":"server-started","payload":{"initDuration":\#(initDuration),"httpPort":\#(httpPort)}}"#
@@ -64,8 +64,13 @@ public enum IPCMessage: Sendable, Equatable {
         }
     }
 
+    /// Whether the message may be dropped when the runtime is not reading fast enough.
+    package var isDroppable: Bool {
+        if case .log = self { true } else { false }
+    }
+
     /// The bytes written to the socket: JSON followed by a NUL byte.
-    public var frame: [UInt8] {
+    package var frame: [UInt8] {
         var bytes = Array(json.utf8)
         bytes.append(0)
         return bytes
@@ -73,7 +78,7 @@ public enum IPCMessage: Sendable, Equatable {
 }
 
 /// Messages sent from the Vercel functions runtime to the function process.
-public enum RuntimeMessage: Sendable, Equatable {
+package enum RuntimeMessage: Sendable, Equatable {
     /// Sent shortly before a request reaches its maximum duration.
     case approachingTimeout(InvocationContext)
     /// A message type this library does not handle.
@@ -81,7 +86,7 @@ public enum RuntimeMessage: Sendable, Equatable {
 
     /// Decodes one NUL-delimited frame, for example
     /// `{"type":"approaching-timeout","context":{"invocationId":"abc","requestId":1}}`.
-    public init?(frame: some Collection<UInt8>) {
+    package init?(frame: some Collection<UInt8>) {
         guard let decoded = try? JSONDecoder().decode(RuntimeFrame.self, from: Data(frame)) else { return nil }
         switch decoded.type {
         case "approaching-timeout":
@@ -111,9 +116,9 @@ extension InvocationContext {
     }
 }
 
-enum JSON {
+package enum JSON {
     /// Encodes a Swift string as a JSON string literal.
-    static func string(_ value: String) -> String {
+    package static func string(_ value: String) -> String {
         // Fast path: base64 log payloads and typical ids need no escaping.
         if !value.utf8.contains(where: { $0 < 0x20 || $0 == UInt8(ascii: "\"") || $0 == UInt8(ascii: "\\") }) {
             return "\"\(value)\""
@@ -141,11 +146,11 @@ enum JSON {
     }
 }
 
-enum Base64 {
+package enum Base64 {
     private static let alphabet = Array("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/".utf8)
 
     /// Standard base64 with padding, as decoded by the runtime.
-    static func encode(_ bytes: [UInt8]) -> String {
+    package static func encode(_ bytes: [UInt8]) -> String {
         var out: [UInt8] = []
         out.reserveCapacity((bytes.count + 2) / 3 * 4)
         var index = 0

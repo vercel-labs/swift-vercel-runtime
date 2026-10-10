@@ -7,8 +7,8 @@ import PackagePlugin
 /// Build Output API (v3) to `.vercel/output`, ready for `vercel deploy --prebuilt`.
 ///
 /// The function uses Vercel's `executable` runtime (`provided.al2023` plus Vercel's runtime
-/// layer), which runs the binary directly and talks to it over the protocol implemented by
-/// `VercelRuntime`.
+/// layer). Its entrypoint is `VercelBootstrap`, which starts the app (any Swift HTTP server that
+/// listens on a port), proxies requests to it and speaks the runtime protocol on its behalf.
 @main
 struct VercelBuildPlugin: CommandPlugin {
     static let usage = """
@@ -34,7 +34,9 @@ struct VercelBuildPlugin: CommandPlugin {
         Use `--disable-sandbox`: the plugin runs a nested `swift build` with the Static Linux SDK,
         which needs the SwiftPM caches and network access that the plugin sandbox blocks.
 
-        Cron jobs are read from `crons` in vercel.json next to Package.swift.
+        The app is a normal Swift server: it should listen on 127.0.0.1 (or 0.0.0.0), ideally on
+        the PORT environment variable. Cron jobs are read from `crons` in vercel.json next to
+        Package.swift.
 
         Deploy the result with: vercel deploy --prebuilt
         """
@@ -86,7 +88,10 @@ struct VercelBuildPlugin: CommandPlugin {
             }
         }
 
-        // 1. Cross-compile.
+        // 1. Cross-compile the app and the bootstrap that runs it.
+        guard ![Self.bootstrapName, "bootstrap", "vercel-bootstrap.json"].contains(product.name) else {
+            throw PluginError.invalidArgument("the executable product cannot be named '\(product.name)'; rename it")
+        }
         print("Building '\(product.name)' for Vercel (\(architecture.rawValue), \(swiftSDK), \(configuration))")
         var buildArguments = [
             "build",
@@ -96,11 +101,13 @@ struct VercelBuildPlugin: CommandPlugin {
         ]
         let binPath: URL
         do {
-            var productArguments = buildArguments + ["--product", product.name]
-            if strip {
-                productArguments += ["-Xlinker", "--strip-all"]
+            for name in [product.name, Self.bootstrapProduct] {
+                var productArguments = buildArguments + ["--product", name]
+                if strip {
+                    productArguments += ["-Xlinker", "--strip-all"]
+                }
+                try run(swift, productArguments, in: packageDirectory)
             }
-            try run(swift, productArguments, in: packageDirectory)
             buildArguments.append("--show-bin-path")
             binPath = URL(fileURLWithPath: try run(swift, buildArguments, in: packageDirectory, captureOutput: true))
         } catch let error as PluginError {
@@ -117,7 +124,9 @@ struct VercelBuildPlugin: CommandPlugin {
         }
 
         let binary = binPath.appending(path: product.name)
+        let bootstrapBinary = binPath.appending(path: Self.bootstrapProduct)
         try checkBinary(binary, architecture: architecture)
+        try checkBinary(bootstrapBinary, architecture: architecture)
 
         // 2. Write the Build Output API directory.
         let output = URL(fileURLWithPath: outputPath, relativeTo: packageDirectory).standardizedFileURL
@@ -126,9 +135,17 @@ struct VercelBuildPlugin: CommandPlugin {
         let function = output.appending(path: "functions/index.func")
         try FileManager.default.createDirectory(at: function, withIntermediateDirectories: true)
 
-        let executable = function.appending(path: "executable")
-        try FileManager.default.copyItem(at: binary, to: executable)
-        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path())
+        let executable = function.appending(path: product.name)
+        let bootstrap = function.appending(path: Self.bootstrapName)
+        for (source, destination) in [(binary, executable), (bootstrapBinary, bootstrap)] {
+            try FileManager.default.copyItem(at: source, to: destination)
+            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: destination.path())
+        }
+        // Tells the bootstrap which executable to run and which paths are cron jobs.
+        try writeJSON(
+            ["executable": product.name, "crons": crons.compactMap { $0["path"] }] as [String: Any],
+            to: function.appending(path: "vercel-bootstrap.json")
+        )
 
         // SwiftPM resource bundles are looked up next to the executable at runtime.
         let resourceBundles = try FileManager.default.contentsOfDirectory(at: binPath, includingPropertiesForKeys: nil)
@@ -139,7 +156,7 @@ struct VercelBuildPlugin: CommandPlugin {
 
         var functionConfig: [String: Any] = [
             "runtime": "executable",
-            "handler": "executable",
+            "handler": Self.bootstrapName,
             "architecture": architecture.rawValue,
             "supportsResponseStreaming": true,
         ]
@@ -169,14 +186,25 @@ struct VercelBuildPlugin: CommandPlugin {
         }
         try writeJSON(outputConfig, to: output.appending(path: "config.json"))
 
-        let size = (try? FileManager.default.attributesOfItem(atPath: executable.path())[.size] as? Int) ?? 0
+        func megabytes(_ url: URL) -> Int {
+            ((try? FileManager.default.attributesOfItem(atPath: url.path())[.size] as? Int) ?? 0) / 1_000_000
+        }
         print(
             """
-            Wrote \(relativePath(output, to: packageDirectory)) (\(product.name): \(size / 1_000_000) MB, \(architecture.rawValue))
+            Wrote \(relativePath(output, to: packageDirectory)) (\(product.name): \(megabytes(executable)) MB, bootstrap: \(megabytes(bootstrap)) MB, \(architecture.rawValue))
             Deploy with: vercel deploy --prebuilt
             """
         )
     }
+
+    /// The bootstrap product in this package, and its file name in the function.
+    ///
+    /// Vercel's `executable` runtime starts the file named `executable` (the Go builder lays out
+    /// standalone servers the same way). Never name a function file `bootstrap`: on
+    /// `provided.al2023`, AWS Lambda runs a file with that name as the Lambda runtime itself,
+    /// bypassing Vercel's runtime.
+    static let bootstrapProduct = "VercelBootstrap"
+    static let bootstrapName = "executable"
 
     private func executableProduct(named name: String?, in package: Package) throws -> ExecutableProduct {
         let executables = package.products.compactMap { $0 as? ExecutableProduct }

@@ -41,8 +41,8 @@ public struct VercelGeolocation: Sendable, Hashable, Codable {
 
 /// Vercel-specific information about a request.
 ///
-/// Available as `request.vercel` in the framework adapters, or `headers.vercel` on any
-/// `HTTPFields`.
+/// Available as `headers.vercel` on any `HTTPFields`, for example `request.headers.vercel` in
+/// Vapor 5 and Hummingbird 2.
 public struct VercelRequestInfo: Sendable {
     public let headers: HTTPFields
 

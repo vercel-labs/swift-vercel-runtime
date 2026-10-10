@@ -26,8 +26,9 @@ let package = Package(
         .executableTarget(
             name: "App",
             dependencies: [
-                .product(name: "VercelVapor", package: "swift-vercel-runtime"),
                 .product(name: "Vapor", package: "vapor"),
+                // Optional: per-request logs, waitUntil and request helpers.
+                .product(name: "VercelRuntime", package: "swift-vercel-runtime"),
             ]
         ),
     ]
