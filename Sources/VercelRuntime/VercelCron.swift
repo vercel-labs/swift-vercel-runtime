@@ -2,7 +2,7 @@ public import HTTPTypes
 
 /// Vercel Cron Jobs support.
 ///
-/// Declare crons in `vercel.json` next to `Package.swift`; the `vercel-build` plugin copies them
+/// Declare crons in `vercel.json` next to `Package.swift`; the `vercel` plugin copies them
 /// into the deployment:
 ///
 /// ```json

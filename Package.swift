@@ -18,10 +18,10 @@ let package = Package(
         // helpers, environment.
         .library(name: "VercelRuntime", targets: ["VercelRuntime"]),
         // The function entrypoint: runs your server and speaks Vercel's runtime protocol for it.
-        // Built and deployed by `vercel-build`; you never depend on it directly.
+        // Built and deployed by `swift package vercel`; you never depend on it directly.
         .executable(name: "VercelBootstrap", targets: ["VercelBootstrap"]),
-        // `swift package --disable-sandbox vercel-build`
-        .plugin(name: "VercelBuildPlugin", targets: ["VercelBuildPlugin"]),
+        // `swift package --disable-sandbox vercel`
+        .plugin(name: "VercelPlugin", targets: ["VercelPlugin"]),
     ],
     dependencies: [
         .package(url: "https://github.com/apple/swift-http-types.git", from: "1.7.0"),
@@ -56,10 +56,10 @@ let package = Package(
             swiftSettings: swiftSettings
         ),
         .plugin(
-            name: "VercelBuildPlugin",
+            name: "VercelPlugin",
             capability: .command(
                 intent: .custom(
-                    verb: "vercel-build",
+                    verb: "vercel",
                     description: "Cross-compile an executable with the Swift Static Linux SDK and write Vercel Build Output API files to .vercel/output."
                 ),
                 permissions: [

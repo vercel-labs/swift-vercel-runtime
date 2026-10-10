@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Builds an example with the vercel-build plugin and runs the IPC contract harness against the
+# Builds an example with the vercel plugin and runs the IPC contract harness against the
 # real Linux binary.
 #
 # The binary is fully static, so on a Linux host of the same architecture (CI) the harness runs it
@@ -42,7 +42,7 @@ for EXAMPLE in "$@"; do
   EXAMPLE="${EXAMPLE%/}"
   echo "==> $EXAMPLE"
   if [ "${SKIP_BUILD:-0}" != "1" ]; then
-    (cd "$EXAMPLE" && swift package --disable-sandbox vercel-build --architecture "$ARCHITECTURE")
+    (cd "$EXAMPLE" && swift package --disable-sandbox vercel --architecture "$ARCHITECTURE")
   fi
 
   FUNCTION="$EXAMPLE/.vercel/output/functions/index.func"

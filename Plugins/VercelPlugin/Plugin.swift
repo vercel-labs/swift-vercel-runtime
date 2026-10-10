@@ -1,7 +1,7 @@
 import Foundation
 import PackagePlugin
 
-/// `swift package --disable-sandbox vercel-build`
+/// `swift package --disable-sandbox vercel`
 ///
 /// Cross-compiles an executable product with the Swift Static Linux SDK and writes Vercel's
 /// Build Output API (v3) to `.vercel/output`, ready for `vercel deploy --prebuilt`.
@@ -10,11 +10,11 @@ import PackagePlugin
 /// layer). Its entrypoint is `VercelBootstrap`, which starts the app (any Swift HTTP server that
 /// listens on a port), proxies requests to it and speaks the runtime protocol on its behalf.
 @main
-struct VercelBuildPlugin: CommandPlugin {
+struct VercelPlugin: CommandPlugin {
     static let usage = """
         OVERVIEW: Build a Swift server for Vercel's native `executable` runtime.
 
-        USAGE: swift package --disable-sandbox vercel-build [options]
+        USAGE: swift package --disable-sandbox vercel [options]
 
         OPTIONS:
           --product <name>         Executable product to build. Defaults to the package's only
@@ -117,7 +117,7 @@ struct VercelBuildPlugin: CommandPlugin {
 
                 Make sure `swift` is the swift.org toolchain, the Swift SDK '\(swiftSDK)' for the same
                 Swift version is installed (`swift sdk list`), and the plugin runs with
-                `swift package --disable-sandbox vercel-build`.
+                `swift package --disable-sandbox vercel`.
                 Static Linux SDK: https://www.swift.org/documentation/articles/static-linux-getting-started.html
                 """
             )
@@ -236,7 +236,7 @@ struct VercelBuildPlugin: CommandPlugin {
 
         let ignored = config.keys.filter { $0 != "crons" && $0 != "$schema" }.sorted()
         if !ignored.isEmpty {
-            print("note: vercel-build only applies `crons` from vercel.json; ignoring \(ignored.joined(separator: ", "))")
+            print("note: swift package vercel only applies `crons` from vercel.json; ignoring \(ignored.joined(separator: ", "))")
         }
 
         guard let value = config["crons"] else { return [] }
