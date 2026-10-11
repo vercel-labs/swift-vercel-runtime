@@ -21,8 +21,9 @@ let package = Package(
             dependencies: [
                 .product(name: "Hummingbird", package: "hummingbird"),
                 .product(name: "HummingbirdWebSocket", package: "hummingbird-websocket"),
-                // Optional: per-request logs, waitUntil and request helpers.
-                .product(name: "VercelRuntime", package: "swift-vercel-runtime"),
+                // Optional: per-request logs, waitUntil, request helpers, Runtime Cache, Global Config,
+                // rate limiting and OIDC. Or only the products you use, like "VercelRuntime".
+                .product(name: "Vercel", package: "swift-vercel-runtime"),
             ]
         ),
     ]

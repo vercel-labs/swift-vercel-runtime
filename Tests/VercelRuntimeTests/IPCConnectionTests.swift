@@ -2,6 +2,7 @@ import Foundation
 import Synchronization
 import Testing
 @testable import VercelBootstrapCore
+@testable import VercelProtocol
 @testable import VercelRuntime
 
 extension IPCConnection {

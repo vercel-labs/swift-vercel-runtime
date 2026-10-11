@@ -1,4 +1,5 @@
 import Testing
+@testable import VercelProtocol
 @testable import VercelRuntime
 
 @Suite struct IPCMessageTests {
@@ -37,6 +38,35 @@ import Testing
             message.json
                 == #"{"type":"unrecoverable-error","payload":{"exitCode":1,"message":"bad \"thing\"\n\tat\u0001"}}"#
         )
+    }
+
+    @Test func fetchMetricMatchesTheRuntimeSchema() {
+        let context = InvocationContext(invocationID: "inv", requestID: 1)
+        let metric = FetchMetric(id: 1, method: "GET", host: "example.com", pathname: "/v1/x", search: "a=1", statusCode: 200, start: 1_791_734_674_495, duration: 45)
+        let message = IPCMessage.fetchMetric(context, metric)
+        #expect(
+            message.json
+                == #"{"type":"metric","payload":{"context":{"invocationId":"inv","requestId":1},"type":"fetch-metric","payload":{"pathname":"/v1/x","search":"a=1","start":1791734674495,"duration":45,"host":"example.com","statusCode":200,"method":"GET","id":1}}}"#
+        )
+        #expect(
+            IPCMessage.fetchMetric(InvocationContext(invocationID: "inv", requestID: nil), metric).json
+                .hasPrefix(#"{"type":"metric","payload":{"context":{"invocationId":"inv","requestId":null},"type":"fetch-metric""#)
+        )
+    }
+
+    @Test func onlyLogsAndMetricsAreDroppable() {
+        let context = InvocationContext(invocationID: "inv", requestID: 1)
+        let metric = FetchMetric(id: 1, method: "GET", host: "h", pathname: "/", search: "", statusCode: 200, start: 0, duration: 0)
+        #expect(IPCMessage.log(context, message: "m", level: .info).isDroppable)
+        #expect(IPCMessage.fetchMetric(context, metric).isDroppable)
+        #expect(!IPCMessage.end(context).isDroppable)
+        #expect(!IPCMessage.serverStarted(initDuration: 0, httpPort: 1).isDroppable)
+        #expect(!IPCMessage.unrecoverableError(exitCode: 1, message: "m").isDroppable)
+    }
+
+    @Test func jsonObjectsAreSortedAndEscaped() {
+        #expect(JSON.object([:]) == "{}")
+        #expect(JSON.object(["b": "2", "a": "\"1\""]) == #"{"a":"\"1\"","b":"2"}"#)
     }
 
     @Test func frameIsNulTerminated() {

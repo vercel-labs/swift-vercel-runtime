@@ -47,6 +47,9 @@ package enum IPCMessage: Sendable, Equatable {
     case log(InvocationContext, message: String, level: LogLevel)
     /// Reports a fatal startup failure. Accepted before `serverStarted`.
     case unrecoverableError(exitCode: Int32, message: String)
+    /// An outbound HTTP request made while handling the request (a `metric` of type
+    /// `fetch-metric`), shown under External APIs in Vercel's Observability.
+    case fetchMetric(InvocationContext, FetchMetric)
 
     /// The JSON encoding of the message, without the NUL terminator.
     package var json: String {
@@ -61,12 +64,17 @@ package enum IPCMessage: Sendable, Equatable {
             return #"{"type":"log","payload":{"context":\#(context.json),"message":\#(JSON.string(encoded)),"level":\#(JSON.string(level.rawValue))}}"#
         case .unrecoverableError(let exitCode, let message):
             return #"{"type":"unrecoverable-error","payload":{"exitCode":\#(exitCode),"message":\#(JSON.string(message))}}"#
+        case .fetchMetric(let context, let metric):
+            return #"{"type":"metric","payload":{"context":\#(context.json),"type":"fetch-metric","payload":\#(metric.json)}}"#
         }
     }
 
     /// Whether the message may be dropped when the runtime is not reading fast enough.
     package var isDroppable: Bool {
-        if case .log = self { true } else { false }
+        switch self {
+        case .log, .fetchMetric: true
+        case .serverStarted, .end, .unrecoverableError: false
+        }
     }
 
     /// The bytes written to the socket: JSON followed by a NUL byte.
@@ -143,6 +151,12 @@ package enum JSON {
         }
         out += "\""
         return out
+    }
+
+    /// Encodes a string dictionary as a JSON object, with keys sorted so the output is stable.
+    package static func object(_ value: [String: String]) -> String {
+        let members = value.sorted { $0.key < $1.key }.map { "\(string($0.key)):\(string($0.value))" }
+        return "{" + members.joined(separator: ",") + "}"
     }
 }
 

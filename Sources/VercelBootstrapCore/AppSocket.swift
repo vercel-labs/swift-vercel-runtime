@@ -1,8 +1,9 @@
 import NIOCore
 import NIOPosix
-import VercelRuntime
+import VercelProtocol
 
-/// The Unix socket apps connect to (via `VercelRuntime`) for per-request logs and `waitUntil`.
+/// The Unix socket apps connect to (via `VercelRuntime`) for per-request logs, `waitUntil`, fetch
+/// metrics and the hidden runtime cache configuration.
 package enum AppSocket {
     /// Listens on `path`, replacing any stale socket file.
     package static func bind(path: String, tracker: RequestTracker, group: any EventLoopGroup) async throws -> any Channel {
@@ -58,12 +59,19 @@ final class AppConnectionHandler: ChannelInboundHandler {
     }
 
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
+        // A rejected second connection may still deliver frames before it closes: ignore them.
+        guard let connection else { return }
         let frame = unwrapInboundIn(data)
         switch AppMessage(frame: frame.readableBytesView) {
         case .log(let token, let message, let level):
             tracker.log(token: token, message: message, level: level)
         case .release(let token):
             tracker.released(token: token)
+        case .fetchMetric(let token, let metric):
+            tracker.fetchMetric(token: token, metric: metric)
+        case .runtimeCache(let token):
+            // Always answered, so the app never waits.
+            connection.send(.runtimeCache(token: token, headers: tracker.runtimeCacheFields(token: token)))
         case nil:
             writeToStandardError("[vercel] ignored an invalid message from the app")
         }

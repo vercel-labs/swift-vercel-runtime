@@ -1,6 +1,7 @@
 import NIOCore
 import Synchronization
 import Testing
+@testable import VercelProtocol
 @testable import VercelRuntime
 
 @Suite struct IPCOutboxTests {

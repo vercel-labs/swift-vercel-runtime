@@ -64,14 +64,14 @@ for EXAMPLE in "$@"; do
   fi
   echo "PASS  bootstrap does not link full Foundation/ICU ($(($(wc -c < "$HANDLER") / 1000000)) MB)"
 
-  # Vapor 5 avoids full Foundation; VercelRuntime must not drag it back in. Hummingbird links
-  # Foundation itself, so it is exempt.
+  # Vapor 5 avoids full Foundation; VercelRuntime and VercelCache (with VercelHTTP and
+  # AsyncHTTPClient) must not drag it back in. Hummingbird links Foundation itself, so it is exempt.
   if [ "$EXAMPLE" = "Examples/HelloVapor" ]; then
     if LC_ALL=C grep -q icudt "$APP_BINARY"; then
       echo "FAIL  $EXAMPLE links full Foundation/ICU" >&2
       exit 1
     fi
-    echo "PASS  app does not link full Foundation/ICU"
+    echo "PASS  app does not link full Foundation/ICU ($(($(wc -c < "$APP_BINARY") / 1000000)) MB)"
   fi
 
   # Crons declared in vercel.json must be copied into the Build Output config.
@@ -90,9 +90,23 @@ EOF
   if grep -q 'HummingbirdWebSocket' "$ROOT/$EXAMPLE/Package.swift"; then
     HARNESS_FLAGS="--websocket"
   fi
-  # Apps without VercelRuntime get every check except the optional features it provides.
-  if ! grep -q 'name: "VercelRuntime"' "$ROOT/$EXAMPLE/Package.swift"; then
+  # Which swift-vercel-runtime products the app uses, matched exactly (`"Vercel"` is not
+  # `"VercelRuntime"`).
+  uses_product() {
+    grep -Fq ".product(name: \"$1\"" "$ROOT/$EXAMPLE/Package.swift"
+  }
+  # Apps without VercelRuntime (directly or through the `Vercel` umbrella product) get every check
+  # except the optional features it provides.
+  if ! uses_product Vercel && ! uses_product VercelRuntime; then
     HARNESS_FLAGS="$HARNESS_FLAGS --minimal"
+  fi
+  # Apps with VercelCache (directly or through the umbrella) implement the Runtime Cache routes.
+  if uses_product Vercel || uses_product VercelCache; then
+    HARNESS_FLAGS="$HARNESS_FLAGS --runtime-cache"
+  fi
+  # Apps with the umbrella product implement the other feature module routes too.
+  if uses_product Vercel; then
+    HARNESS_FLAGS="$HARNESS_FLAGS --vercel-modules"
   fi
   if [ "$HARNESS" = "native" ]; then
     # shellcheck disable=SC2086

@@ -6,6 +6,7 @@ import Glibc
 import Musl
 #endif
 import Logging
+import VercelProtocol
 
 /// A swift-log handler that attributes logs to the request that produced them.
 ///

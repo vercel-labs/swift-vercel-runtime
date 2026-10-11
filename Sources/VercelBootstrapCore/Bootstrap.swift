@@ -8,7 +8,7 @@ import Musl
 import NIOCore
 import NIOPosix
 import Synchronization
-import VercelRuntime
+import VercelProtocol
 
 /// The function entrypoint on Vercel.
 ///

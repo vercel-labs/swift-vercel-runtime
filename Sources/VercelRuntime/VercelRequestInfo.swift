@@ -1,4 +1,10 @@
+#if canImport(FoundationEssentials)
+public import FoundationEssentials
+#else
+public import Foundation
+#endif
 public import HTTPTypes
+import VercelProtocol
 
 /// Where a request came from, from the headers Vercel adds to every request.
 ///
@@ -81,6 +87,21 @@ public struct VercelRequestInfo: Sendable {
     public var oidcToken: String? {
         headers[.vercelOIDCToken] ?? VercelEnvironment.current.oidcToken
     }
+
+    /// When the Vercel functions runtime will stop this request (its maximum duration), from
+    /// `x-vercel-deadline`, with millisecond precision. `nil` when the header is missing or
+    /// malformed, for example locally.
+    ///
+    /// Use it to bound work, such as timeouts for outbound requests:
+    ///
+    /// ```swift
+    /// if let deadline = request.headers.vercel.deadline {
+    ///     let remaining = deadline.timeIntervalSinceNow
+    /// }
+    /// ```
+    public var deadline: Date? {
+        headers[.vercelDeadline].flatMap(parseRFC3339)
+    }
 }
 
 extension HTTPFields {
@@ -100,6 +121,7 @@ extension HTTPField.Name {
     static let vercelIPLongitude = Self("x-vercel-ip-longitude")!
     static let vercelIPPostalCode = Self("x-vercel-ip-postal-code")!
     static let vercelOIDCToken = Self(VercelHeader.oidcToken)!
+    static let vercelDeadline = Self(VercelHeader.deadline)!
 }
 
 /// Regional indicator symbols for a two-letter uppercase country code.
@@ -112,34 +134,4 @@ func flagEmoji(_ countryCode: String) -> String? {
         flag.append(indicator)
     }
     return String(flag)
-}
-
-/// Decodes `%XX` escapes as UTF-8, like JavaScript's `decodeURIComponent`. Returns the input
-/// unchanged if it is malformed.
-package func percentDecoded(_ value: String) -> String {
-    // A byte search on purpose: `String.contains(_: String)` resolves to Foundation's
-    // NSString API here, which would link all of Foundation and ICU (~40 MB) into static binaries.
-    guard value.utf8.contains(UInt8(ascii: "%")) else { return value }
-    var bytes: [UInt8] = []
-    var iterator = value.utf8.makeIterator()
-    while let byte = iterator.next() {
-        guard byte == UInt8(ascii: "%") else {
-            bytes.append(byte)
-            continue
-        }
-        guard let high = iterator.next().flatMap(hexValue), let low = iterator.next().flatMap(hexValue) else {
-            return value
-        }
-        bytes.append(high << 4 | low)
-    }
-    return String(validating: bytes, as: UTF8.self) ?? value
-}
-
-private func hexValue(_ byte: UInt8) -> UInt8? {
-    switch byte {
-    case UInt8(ascii: "0")...UInt8(ascii: "9"): byte - UInt8(ascii: "0")
-    case UInt8(ascii: "a")...UInt8(ascii: "f"): byte - UInt8(ascii: "a") + 10
-    case UInt8(ascii: "A")...UInt8(ascii: "F"): byte - UInt8(ascii: "A") + 10
-    default: nil
-    }
 }
