@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.6.0
 
 - `swift package --disable-sandbox vercel init` also writes the local Swift version to
   `.swift-version` (unless the file exists): the exact release for a swift.org toolchain (like

@@ -3,7 +3,7 @@
 # can run `swift package vercel` itself. It is the project's Install Command, which
 # `swift package --disable-sandbox vercel init` sets in vercel.json (with the URL for its release):
 #
-#   Install Command: curl -fsSL https://raw.githubusercontent.com/vercel-labs/swift-vercel-runtime/0.5.0/scripts/vercel-install-swift.sh | bash
+#   Install Command: curl -fsSL https://raw.githubusercontent.com/vercel-labs/swift-vercel-runtime/0.6.0/scripts/vercel-install-swift.sh | bash
 #   Build Command:   .vercel/bin/swift package --disable-sandbox vercel
 #
 # Vercel saves <repository root>/.vercel/cache after every build and restores it before the next
