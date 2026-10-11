@@ -392,8 +392,9 @@ in swift-aws-lambda-runtime). Its build files go to `.build/vercel`.
 The output follows the [Build Output API](https://vercel.com/docs/build-output-api/v3): one
 function (`functions/index.func`) with `"runtime": "executable"` whose handler, `executable`, is
 the bootstrap, with your app's binary next to it, plus a route that sends every path to it. SwiftPM resource bundles
-are copied next to the binaries, and `crons` are taken from `vercel.json` (other `vercel.json`
-settings, apart from the build settings Vercel applies itself, are not applied to the output).
+are copied next to the binaries, and `crons` are taken from `vercel.json` for prebuilt deployments
+(inside `vercel build`, as in a Git deployment, Vercel adds them itself). Other `vercel.json`
+settings, apart from the build settings Vercel applies itself, are not applied to the output.
 
 ## The bootstrap in detail
 

@@ -195,7 +195,10 @@ struct VercelPlugin: CommandPlugin {
                 ["src": "/(.*)", "dest": "/index"],
             ],
         ]
-        if !crons.isEmpty {
+        // Inside `vercel build` (which sets VERCEL=1, as in a Git deployment), Vercel adds the
+        // crons from vercel.json itself, and rejects the deployment if they appear twice.
+        let insideVercelBuild = environment["VERCEL"] == "1"
+        if !crons.isEmpty && !insideVercelBuild {
             outputConfig["crons"] = crons
         }
         try writeJSON(outputConfig, to: output.appending(path: "config.json"))
@@ -206,8 +209,8 @@ struct VercelPlugin: CommandPlugin {
         print(
             "Wrote \(relativePath(output, to: packageDirectory)) (\(product.name): \(megabytes(executable)) MB, bootstrap: \(megabytes(bootstrap)) MB, \(architecture.rawValue))"
         )
-        // In a Vercel build (a Git deployment), Vercel deploys the output itself.
-        if environment["VERCEL"] != "1" {
+        // Inside `vercel build`, Vercel deploys the output itself.
+        if !insideVercelBuild {
             print("Deploy with: vercel deploy --prebuilt")
         }
     }

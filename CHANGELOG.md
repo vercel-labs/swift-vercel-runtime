@@ -10,6 +10,8 @@
   from another directory.
 - `vercel.json` build settings (`installCommand`, `buildCommand`, ...) no longer print an
   "ignoring" note.
+- Inside `vercel build` (`VERCEL=1`), `crons` are no longer copied into `config.json`: Vercel adds
+  them from `vercel.json` itself and rejected the duplicates.
 
 ## 0.3.0
 
