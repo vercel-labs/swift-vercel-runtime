@@ -1,8 +1,17 @@
+#if canImport(Darwin)
+import Darwin
+#elseif canImport(Glibc)
+import Glibc
+#elseif canImport(Musl)
+import Musl
+#endif
 import HTTPTypes
 import NIOHTTP1
+import NIOPosix
 import Synchronization
 import Testing
 @testable import VercelBootstrapCore
+@testable import VercelProtocol
 @testable import VercelRuntime
 
 /// Records what the tracker sends to the runtime and to the app.
@@ -82,6 +91,71 @@ final class Recorder: AppPeer, @unchecked Sendable {
         let tracker = RequestTracker { _ in }
         let tokens = (0..<100).map { _ in tracker.begin(context) }
         #expect(Set(tokens).count == 100)
+    }
+
+    let metric = FetchMetric(id: 1, method: "GET", host: "example.com", pathname: "/v1/x", search: "a=1", statusCode: 200, start: 1, duration: 45)
+
+    @Test func forwardsFetchMetricsForTrackedRequests() {
+        let recorder = Recorder()
+        let tracker = RequestTracker { recorder.runtime($0) }
+        _ = tracker.appConnected(recorder)
+        let token = tracker.begin(context)
+        tracker.fetchMetric(token: token, metric: metric)
+        // Still tracked while the app has waitUntil work.
+        tracker.responseFinished(token: token)
+        tracker.fetchMetric(token: token, metric: metric)
+        #expect(recorder.toRuntime == [.fetchMetric(context, metric), .fetchMetric(context, metric)])
+    }
+
+    @Test func dropsFetchMetricsForRequestsItNoLongerTracks() {
+        let recorder = Recorder()
+        let tracker = RequestTracker { recorder.runtime($0) }
+        let token = tracker.begin(context)
+        tracker.responseFinished(token: token)
+        tracker.fetchMetric(token: token, metric: metric)
+        tracker.fetchMetric(token: "unknown", metric: metric)
+        #expect(recorder.toRuntime == [.end(context)])
+    }
+
+    @Test func keepsHiddenRuntimeCacheFieldsWhileTracked() {
+        let recorder = Recorder()
+        let tracker = RequestTracker { recorder.runtime($0) }
+        _ = tracker.appConnected(recorder)
+        let hidden = ["x-vercel-sc-host": "cache.internal", "x-vercel-sc-headers": "{}"]
+        let token = tracker.begin(context, runtimeCache: hidden)
+        let plain = tracker.begin(InvocationContext(invocationID: "inv", requestID: 2))
+        #expect(tracker.runtimeCacheFields(token: token) == hidden)
+        #expect(tracker.runtimeCacheFields(token: plain) == [:])
+        #expect(tracker.runtimeCacheFields(token: "unknown") == [:])
+
+        tracker.responseFinished(token: token)
+        #expect(tracker.runtimeCacheFields(token: token) == hidden, "available to waitUntil work")
+        tracker.released(token: token)
+        #expect(tracker.runtimeCacheFields(token: token) == [:])
+    }
+}
+
+/// The bootstrap's app socket against the real app client.
+@Suite(.serialized) struct AppSocketTests {
+    @Test func answersRuntimeCacheRequestsAndForwardsMetrics() async throws {
+        let path = "/tmp/vswift-app-\(getpid())-\(UInt32.random(in: 0...UInt32.max)).sock"
+        let recorder = Recorder()
+        let tracker = RequestTracker { recorder.runtime($0) }
+        let server = try await AppSocket.bind(path: path, tracker: tracker, group: MultiThreadedEventLoopGroup.singleton)
+        let context = InvocationContext(invocationID: "inv", requestID: 1)
+        let hidden = ["x-vercel-sc-host": "cache.internal", "x-vercel-sc-headers": #"{"authorization":"Bearer abc"}"#]
+        let token = tracker.begin(context, runtimeCache: hidden)
+
+        let client = try await Task.detached { try BootstrapClient(path: path) }.value
+        #expect(await client.runtimeCacheFields(token: token) == hidden)
+        #expect(await client.runtimeCacheFields(token: "unknown") == [:])
+
+        client.fetchMetric(FetchMetric(id: 0, method: "GET", host: "h", pathname: "/", search: "", statusCode: 200, start: 1, duration: 2), token: token)
+        try await waitUntil { !recorder.toRuntime.isEmpty }
+        #expect(recorder.toRuntime == [.fetchMetric(context, FetchMetric(id: 1, method: "GET", host: "h", pathname: "/", search: "", statusCode: 200, start: 1, duration: 2))])
+
+        await client.close()
+        try await server.close()
     }
 }
 
@@ -180,8 +254,8 @@ final class Recorder: AppPeer, @unchecked Sendable {
         headers.add(name: "Accept", value: "a")
         headers.add(name: "Accept", value: "b")
 
-        let (fields, invocation) = rewriteRequestHeaders(headers)
-        #expect(invocation == InvocationContext(invocationID: "inv", requestID: 3))
+        let (fields, internalFields) = rewriteRequestHeaders(headers)
+        #expect(internalFields == VercelInternalFields(invocation: InvocationContext(invocationID: "inv", requestID: 3)))
         let forwarded = HTTPHeaders(fields)
         #expect(forwarded.map(\.name) == ["Host", "Accept", "Accept", "x-vercel-oidc-token"])
         #expect(forwarded["accept"] == ["a", "b"])
@@ -191,8 +265,25 @@ final class Recorder: AppPeer, @unchecked Sendable {
     @Test func requestsFromOutsideTheRuntimeHaveNoInvocation() {
         var headers = HTTPHeaders()
         headers.add(name: "x-vercel-bootstrap-request", value: "spoofed")
-        let (fields, invocation) = rewriteRequestHeaders(headers)
-        #expect(invocation == nil)
+        let (fields, internalFields) = rewriteRequestHeaders(headers)
+        #expect(internalFields.invocation == nil)
         #expect(fields.isEmpty)
+    }
+
+    @Test func exposesTheDeadlineAndKeepsHiddenRuntimeCacheFields() {
+        var headers = HTTPHeaders()
+        headers.add(name: "x-vercel-deadline", value: "client")
+        headers.add(name: "x-vercel-internal-invocation-id", value: "inv")
+        headers.add(name: "x-vercel-internal-deadline", value: "2026-10-11T17:00:00.123Z")
+        headers.add(name: "x-vercel-sc-host", value: "cache.internal")
+        headers.add(name: "x-vercel-sc-headers", value: "{}")
+        headers.add(name: "x-vercel-sc-no-header-leak", value: "1")
+        headers.add(name: "accept", value: "*/*")
+
+        let (fields, internalFields) = rewriteRequestHeaders(headers)
+        #expect(HTTPHeaders(fields).map(\.name) == ["accept", "x-vercel-deadline"])
+        #expect(HTTPHeaders(fields)["x-vercel-deadline"] == ["2026-10-11T17:00:00.123Z"])
+        #expect(internalFields.invocation == InvocationContext(invocationID: "inv", requestID: nil))
+        #expect(internalFields.hiddenRuntimeCacheFields == ["x-vercel-sc-host": "cache.internal", "x-vercel-sc-headers": "{}"])
     }
 }

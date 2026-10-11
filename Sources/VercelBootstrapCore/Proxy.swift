@@ -2,7 +2,7 @@ import HTTPTypes
 import NIOCore
 import NIOHTTP1
 import NIOPosix
-import VercelRuntime
+import VercelProtocol
 
 /// What the proxy needs to know.
 package struct ProxyConfiguration: Sendable {
@@ -50,10 +50,12 @@ package enum ProxyServer {
 }
 
 /// Rewrites request headers for the app: removes the runtime's internal headers (exposing the
-/// OIDC token as `x-vercel-oidc-token`) and any client-supplied bootstrap token.
+/// OIDC token as `x-vercel-oidc-token` and the deadline as `x-vercel-deadline`) and any
+/// client-supplied bootstrap token.
 ///
-/// Returns the headers to forward, as `HTTPFields`, and the invocation the request belongs to.
-package func rewriteRequestHeaders(_ headers: HTTPHeaders) -> (HTTPFields, InvocationContext?) {
+/// Returns the headers to forward, as `HTTPFields`, the invocation the request belongs to and the
+/// runtime cache configuration hidden from the app.
+package func rewriteRequestHeaders(_ headers: HTTPHeaders) -> (fields: HTTPFields, internal: VercelInternalFields) {
     var fields = HTTPFields()
     fields.reserveCapacity(headers.count)
     for (name, value) in headers {
@@ -63,8 +65,8 @@ package func rewriteRequestHeaders(_ headers: HTTPHeaders) -> (HTTPFields, Invoc
         }
     }
     fields[.bootstrapRequest] = nil
-    let invocation = fields.removeVercelInternalFields()
-    return (fields, invocation)
+    let internalFields = fields.extractVercelInternalFields()
+    return (fields, internalFields)
 }
 
 extension HTTPField.Name {
@@ -168,19 +170,19 @@ final class ProxyHandler: ChannelDuplexHandler, RemovableChannelHandler {
             return
         }
 
-        let (fields, invocation) = rewriteRequestHeaders(head.headers)
+        let (fields, internalFields) = rewriteRequestHeaders(head.headers)
         var forwarded = fields
-        if let invocation {
-            let token = configuration.tracker.begin(invocation)
+        if let invocation = internalFields.invocation {
+            let token = configuration.tracker.begin(invocation, runtimeCache: internalFields.hiddenRuntimeCacheFields)
             exchange.token = token
             forwarded[.bootstrapRequest] = token
         }
 
         if configuration.bootstrap.isCronPath(head.uri), let secret = configuration.cronSecret, !secret.isEmpty,
-            !VercelCron.isAuthorized(fields, secret: secret)
+            !CronAuthorization.isAuthorized(fields, secret: secret)
         {
             self.exchange = exchange
-            respondLocally(status: .unauthorized, contentType: "application/json; charset=utf-8", body: VercelCron.unauthorizedBody)
+            respondLocally(status: .unauthorized, contentType: "application/json; charset=utf-8", body: CronAuthorization.unauthorizedBody)
             return
         }
 

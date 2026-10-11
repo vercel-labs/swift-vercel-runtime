@@ -1,12 +1,13 @@
 import Logging
 import Vapor
+import VercelCache
 import VercelRuntime
 
 // A regular Vapor 5 app: nothing here is required to run on Vercel. Vapor reads the PORT
 // environment variable, which the Vercel bootstrap sets.
 //
-// `VercelRuntime` is optional. It is used here for per-request logs, `waitUntil` and the request
-// helpers.
+// `VercelRuntime` and `VercelCache` are optional. They are used here for per-request logs,
+// `waitUntil`, the request helpers and the Runtime Cache.
 @main
 struct App {
     static func main() async throws {
@@ -23,8 +24,9 @@ struct App {
     }
 }
 
-/// Runs each request inside `Vercel.withRequest`, so `VercelLogHandler` attributes its logs to it
-/// and `Vercel.waitUntil` keeps the function alive for its background work. Locally it does nothing.
+/// Runs each request inside `Vercel.withRequest`, so `VercelLogHandler` attributes its logs to it,
+/// `Vercel.waitUntil` keeps the function alive for its background work, and `RuntimeCache` finds
+/// the request's cache. Locally it only sets `Vercel.currentRequest`.
 struct VercelRequestMiddleware: Middleware {
     func respond(to request: Request, chainingTo next: any Responder) async throws -> Response {
         try await Vercel.withRequest(request.headers) {
@@ -38,6 +40,23 @@ struct Info: Content {
     var framework: String
     var architecture: String
     var region: String?
+}
+
+struct RequestContextDetails: Content {
+    var headers: [String]
+    var deadline: String?
+    var deadlineMilliseconds: Int?
+}
+
+struct CacheResult: Content {
+    var operation: String
+    var key: String?
+    var value: String?
+    var hit: Bool?
+    /// Seconds.
+    var ttl: Int?
+    var tags: [String]?
+    var error: String?
 }
 
 struct RequestDetails: Content {
@@ -74,6 +93,72 @@ func routes(_ app: Application) throws {
     // Echoes request header names so the header stripping can be checked end to end.
     app.get("headers") { req in
         req.headers.map { $0.name.canonicalName }.sorted()
+    }
+
+    // What VercelRuntime knows about the current request, for the contract checks: the header
+    // names (never their values) and the deadline.
+    app.get("request-context") { req in
+        RequestContextDetails(
+            headers: req.headers.map { $0.name.canonicalName }.sorted(),
+            deadline: req.headers[.init("x-vercel-deadline")!],
+            deadlineMilliseconds: Vercel.deadline.map { Int(($0.timeIntervalSince1970 * 1000).rounded()) }
+        )
+    }
+
+    // Runtime Cache. Without a cache from Vercel (locally, for example) it is in memory. Errors
+    // are answered as strings, for end-to-end tests.
+    let cache = RuntimeCache(namespace: "hello-vapor")
+
+    app.get("cache", ":key") { req in
+        var result = CacheResult(operation: "get")
+        let key = try req.parameters.require("key")
+        result.key = key
+        do {
+            result.value = try await cache.get(key, as: String.self)
+            result.hit = result.value != nil
+        } catch {
+            result.error = "\(error)"
+        }
+        return result
+    }
+
+    // PUT or POST /cache/:key?value=...&ttl=<seconds>&tags=a,b
+    let setCache: @Sendable (Request) async throws -> CacheResult = { req in
+        var result = CacheResult(operation: "set")
+        let key = try req.parameters.require("key")
+        let value = req.query[String.self, at: "value"] ?? ""
+        let ttl = req.query[Int.self, at: "ttl"]
+        let tags = (req.query[String.self, at: "tags"] ?? "").split(separator: ",").map(String.init)
+        result.key = key
+        result.value = value
+        result.ttl = ttl
+        result.tags = tags
+        do {
+            try await cache.set(key, value, ttl: ttl.map { .seconds($0) }, tags: tags)
+        } catch {
+            result.error = "\(error)"
+        }
+        return result
+    }
+    app.put("cache", ":key", use: setCache)
+    app.post("cache", ":key", use: setCache)
+
+    app.post("cache-expire", ":tag") { req in
+        var result = CacheResult(operation: "expireTag")
+        let tag = try req.parameters.require("tag")
+        result.tags = [tag]
+        do {
+            try await cache.expireTag(tag)
+        } catch {
+            result.error = "\(error)"
+        }
+        return result
+    }
+
+    // Reports an outbound request, shown under External APIs in Vercel's Observability.
+    app.get("fetch-metric") { _ in
+        Vercel.reportFetch(method: "GET", host: "example.com", path: "/v1/x", query: "a=1", statusCode: 200, duration: .milliseconds(45))
+        return "reported\n"
     }
 
     // Streams chunks over time to exercise Vercel response streaming.

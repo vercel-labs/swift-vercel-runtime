@@ -13,20 +13,31 @@ packages/rusty-runtime-nodejs/crates/rusty_runtime/src/child):
   are fatal there),
 - proxies requests to 127.0.0.1:<httpPort> with x-vercel-internal-* headers and expects one
   `end` message per request, with no IPC traffic for /_vercel/ping,
-- sends `approaching-timeout` like the runtime does shortly before a request's deadline.
+- sends `approaching-timeout` like the runtime does shortly before a request's deadline,
+- sends `x-vercel-internal-deadline` with every request, like the runtime,
+- accepts `metric` messages of type `fetch-metric` (Observability: External APIs) with their exact
+  field names and JSON types,
+- rejects `log` and `metric` messages for a request that already got its `end`.
 
 The example apps implement the same routes, so every framework is checked the same way.
 
-Usage: fake-runtime.py [--websocket] [--minimal] /path/to/functions/index.func
+Usage: fake-runtime.py [--websocket] [--minimal] [--runtime-cache] [--vercel-modules]
+                       /path/to/functions/index.func
 
 --minimal skips the checks for the optional VercelRuntime features (per-request logs,
 waitUntil, request helpers), for apps without any Vercel code.
+--runtime-cache checks the Runtime Cache routes (/cache/:key, /cache-expire/:tag): the in-memory
+fallback, and a stub of Vercel's cache service on 127.0.0.1 passed with the request as
+x-vercel-sc-* headers, visible to the app or hidden by the bootstrap.
+--vercel-modules adds smoke checks for the other feature modules' example routes (OIDC claims,
+Global Config without EDGE_CONFIG).
 Python 3.9 compatible (the amazonlinux:2023 image).
 """
 
 import base64
 import concurrent.futures
 import hashlib
+import http.server
 import json
 import os
 import queue
@@ -38,6 +49,7 @@ import sys
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 KNOWN_TYPES = {
@@ -46,7 +58,15 @@ KNOWN_TYPES = {
 }
 LOG_LEVELS = {"trace", "debug", "info", "warn", "error", "fatal"}
 U32_MAX = 2**32 - 1
+U64_MAX = 2**64 - 1
+# The `fetch-metric` payload, as sent by the Node.js and Python runtimes.
+FETCH_METRIC_FIELDS = {
+    "pathname": str, "search": str, "start": int, "duration": int, "host": str,
+    "statusCode": int, "method": str, "id": int,
+}
 CRON_SECRET = "test-cron-secret"
+# The Runtime Cache credentials the harness hands the app. They must never come back in a response.
+RUNTIME_CACHE_AUTHORIZATION = "Bearer test-sc"
 
 
 class ContractError(Exception):
@@ -88,6 +108,111 @@ def validate(message):
         check(level in LOG_LEVELS or stream in ("stdout", "stderr"), "bad log level/stream: %r" % (payload,))
     if kind == "unrecoverable-error":
         check(isinstance(payload.get("exitCode"), int), "bad exitCode: %r" % (payload,))
+    if kind == "metric":
+        check(set(payload) == {"context", "type", "payload"}, "bad metric keys: %r" % (payload,))
+        check(payload["type"] == "fetch-metric", "unsupported metric type: %r" % (payload,))
+        metric = payload["payload"]
+        check(isinstance(metric, dict) and set(metric) == set(FETCH_METRIC_FIELDS), "bad fetch-metric fields: %r" % (metric,))
+        for name, expected in FETCH_METRIC_FIELDS.items():
+            if expected is int:
+                check(is_uint(metric[name], U64_MAX), "fetch-metric %s must be a non-negative integer: %r" % (name, metric))
+            else:
+                check(isinstance(metric[name], str), "fetch-metric %s must be a string: %r" % (name, metric))
+        check(not metric["search"].startswith("?"), "fetch-metric search must not start with ?: %r" % (metric,))
+
+
+def rfc3339(timestamp):
+    """Formats a Unix timestamp like the runtime's x-vercel-internal-deadline."""
+    return time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(timestamp)) + ".%03dZ" % (int(timestamp * 1000) % 1000)
+
+
+def runtime_cache_key_hash(key):
+    """The default Runtime Cache key hash (djb2 over UTF-16 code units with JavaScript's 32-bit
+    integer semantics), like `getCache()` in @vercel/functions and RuntimeCache.defaultKeyHash."""
+    def int32(value):
+        value &= 0xFFFFFFFF
+        return value - 2**32 if value >= 2**31 else value
+    encoded = key.encode("utf-16-le")
+    value = 5381
+    for index in range(0, len(encoded), 2):
+        value = int32(int32(value * 33) ^ (encoded[index] | encoded[index + 1] << 8))
+    return format(value & 0xFFFFFFFF, "x")
+
+
+class StubRuntimeCache:
+    """A stand-in for Vercel's Runtime Cache service (suspense-cache API) on 127.0.0.1.
+
+    Records every request and implements get/set/delete/revalidate with tags, answering gets
+    with `x-vercel-cache-state: fresh` like the real service.
+    """
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.requests = []   # (method, path, {lowercased header: value}, body)
+        self.entries = {}    # path -> (body, tags)
+        stub = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def log_message(self, *args):
+                pass
+
+            def _body(self):
+                if self.headers.get("transfer-encoding", "").lower() == "chunked":
+                    body = b""
+                    while True:
+                        size = int(self.rfile.readline().split(b";")[0], 16)
+                        chunk = self.rfile.read(size + 2)[:size]
+                        if size == 0:
+                            return body
+                        body += chunk
+                return self.rfile.read(int(self.headers.get("content-length") or 0))
+
+            def _handle(self):
+                body = self._body()
+                headers = {name.lower(): value for name, value in self.headers.items()}
+                status, response_headers, response = stub.handle(self.command, self.path, headers, body)
+                self.send_response(status)
+                for name, value in response_headers.items():
+                    self.send_header(name, value)
+                self.send_header("content-length", str(len(response)))
+                self.end_headers()
+                if self.command != "HEAD":
+                    self.wfile.write(response)
+
+            do_GET = do_POST = do_DELETE = do_PUT = do_HEAD = _handle
+
+        self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.server.daemon_threads = True
+        self.port = self.server.server_address[1]
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+    def handle(self, method, path, headers, body):
+        with self.lock:
+            self.requests.append((method, path, headers, body))
+            parsed = urllib.parse.urlsplit(path)
+            if parsed.path.endswith("/v1/suspense-cache/revalidate") and method == "POST":
+                tags = set(urllib.parse.parse_qs(parsed.query).get("tags", [""])[0].split(","))
+                self.entries = {key: entry for key, entry in self.entries.items() if not tags & entry[1]}
+                return 200, {}, b""
+            if method == "GET":
+                if path not in self.entries:
+                    return 404, {}, b""
+                return 200, {"x-vercel-cache-state": "fresh", "content-type": "application/json"}, self.entries[path][0]
+            if method == "POST":
+                tags = set(filter(None, headers.get("x-vercel-cache-tags", "").split(",")))
+                self.entries[path] = (body, tags)
+                return 200, {}, b""
+            if method == "DELETE":
+                self.entries.pop(path, None)
+                return 200, {}, b""
+            return 405, {}, b""
+
+    def take_requests(self):
+        with self.lock:
+            requests, self.requests = self.requests, []
+            return requests
 
 
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -180,6 +305,8 @@ class Runtime:
         self.ends = {}      # (invocationId, requestId) -> count
         self.end_times = {}  # (invocationId, requestId) -> monotonic time of first end
         self.logs = {}      # (invocationId, requestId) -> [(level, text, monotonic time)]
+        self.metrics = {}   # (invocationId, requestId) -> [fetch-metric payload]
+        self.after_end = []  # (message type, (invocationId, requestId)) of logs/metrics after end
         self.stdout_lines = []
         self.other_messages = []
         self.connection = None
@@ -259,8 +386,15 @@ class Runtime:
                     self.end_times.setdefault(key, now)
                 elif message["type"] == "log":
                     key = (payload["context"]["invocationId"], payload["context"]["requestId"])
+                    if key in self.ends:
+                        self.after_end.append(("log", key))
                     text = base64.b64decode(payload["message"]).decode("utf-8", "replace")
                     self.logs.setdefault(key, []).append((payload.get("level"), text, now))
+                elif message["type"] == "metric":
+                    key = (payload["context"]["invocationId"], payload["context"]["requestId"])
+                    if key in self.ends:
+                        self.after_end.append(("metric", key))
+                    self.metrics.setdefault(key, []).append(payload["payload"])
                 else:
                     self.other_messages.append(message)
                 self.lock.notify_all()
@@ -282,14 +416,19 @@ class Runtime:
         with self.lock:
             return list(self.logs.get((invocation_id, request_id), []))
 
-    def request(self, path, invocation_id=None, request_id=None, extra_headers=None):
+    def metrics_for(self, invocation_id, request_id):
+        with self.lock:
+            return list(self.metrics.get((invocation_id, request_id), []))
+
+    def request(self, path, invocation_id=None, request_id=None, extra_headers=None, method=None):
         headers = dict(extra_headers or {})
         if invocation_id is not None:
             headers["x-vercel-internal-invocation-id"] = invocation_id
             headers["x-vercel-internal-request-id"] = str(request_id)
             headers["x-vercel-internal-trace-id"] = "trace-1"
             headers["x-vercel-internal-span-id"] = "span-1"
-        req = urllib.request.Request("http://127.0.0.1:%d%s" % (self.port, path), headers=headers)
+            headers.setdefault("x-vercel-internal-deadline", rfc3339(time.time() + 60))
+        req = urllib.request.Request("http://127.0.0.1:%d%s" % (self.port, path), headers=headers, method=method)
         try:
             with urllib.request.urlopen(req, timeout=10) as response:
                 return response.status, response.read()
@@ -327,9 +466,12 @@ class Runtime:
 
 
 def main():
-    arguments = [argument for argument in sys.argv[1:] if argument not in ("--websocket", "--minimal")]
+    flags = ("--websocket", "--minimal", "--runtime-cache", "--vercel-modules")
+    arguments = [argument for argument in sys.argv[1:] if argument not in flags]
     websocket = "--websocket" in sys.argv[1:]
     minimal = "--minimal" in sys.argv[1:]
+    runtime_cache = "--runtime-cache" in sys.argv[1:]
+    vercel_modules = "--vercel-modules" in sys.argv[1:]
     if len(arguments) != 1:
         print(__doc__)
         return 2
@@ -378,16 +520,17 @@ def main():
         check(b"running natively on Vercel" in body, "body %r" % body)
         check(runtime.wait_for_end("inv-a", 1) == 1, "expected exactly one end")
 
-    @test("internal headers are stripped and OIDC token exposed")
+    @test("internal headers are stripped, OIDC token and deadline exposed")
     def _():
         status, body = runtime.request(
-            "/headers", "inv-a", 2, {"x-vercel-internal-oidc-token": "oidc-123"})
+            "/headers", "inv-a", 2, {"x-vercel-internal-oidc-token": "oidc-123", "x-vercel-deadline": "spoofed"})
         check(status == 200, "status %r" % status)
         names = json.loads(body)
         leaked = [name for name in names if name.startswith("x-vercel-internal-")]
         check(not leaked, "leaked internal headers: %r" % leaked)
         check("x-vercel-oidc-token" in names, "missing x-vercel-oidc-token in %r" % names)
         check(names.count("x-vercel-bootstrap-request") == 1, "expected one bootstrap token in %r" % names)
+        check(names.count("x-vercel-deadline") == 1, "expected one x-vercel-deadline in %r" % names)
         runtime.wait_for_end("inv-a", 2)
 
     @test("runtime cache headers follow the no-leak rules")
@@ -415,6 +558,169 @@ def main():
             payload = json.loads(body)
             check(payload.get("region") == "dev1", "payload %r" % payload)
             runtime.wait_for_end("inv-a", 3)
+
+    if not minimal:
+        @test("the deadline reaches the app as x-vercel-deadline, replacing client values")
+        def _():
+            # 2026-10-11T17:00:00.123Z, with an offset and extra digits that are truncated.
+            deadline = "2026-10-11T19:00:00.1239+02:00"
+            status, body = runtime.request("/request-context", "inv-deadline", 1, {
+                "x-vercel-internal-deadline": deadline, "x-vercel-deadline": "spoofed"})
+            check(status == 200, "status %r" % status)
+            payload = json.loads(body)
+            check(payload.get("deadline") == deadline, "x-vercel-deadline %r" % payload.get("deadline"))
+            check(payload.get("deadlineMilliseconds") == 1791738000123, "Vercel.deadline %r" % payload.get("deadlineMilliseconds"))
+            check(payload["headers"].count("x-vercel-deadline") == 1, "headers %r" % payload["headers"])
+            runtime.wait_for_end("inv-deadline", 1)
+
+        @test("fetch metrics are reported for their request")
+        def _():
+            started = int(time.time() * 1000)
+            status, body = runtime.request("/fetch-metric", "inv-metric", 1)
+            finished = int(time.time() * 1000)
+            check(status == 200 and body == b"reported\n", "status %r body %r" % (status, body))
+            runtime.wait_for_end("inv-metric", 1)
+            # The app sends the metric before releasing the request, so it arrives before end.
+            metrics = runtime.metrics_for("inv-metric", 1)
+            check(len(metrics) == 1, "expected one fetch-metric, got %r" % metrics)
+            metric = metrics[0]
+            expected = {"pathname": "/v1/x", "search": "a=1", "host": "example.com", "method": "GET",
+                        "statusCode": 200, "duration": 45}
+            check(all(metric[key] == value for key, value in expected.items()), "metric %r" % metric)
+            check(metric["id"] >= 1, "id %r" % metric["id"])
+            check(started - 45 - 1000 <= metric["start"] <= finished, "start %r not within [%r, %r]" % (metric["start"], started - 45, finished))
+
+            # Ids increment per process.
+            runtime.request("/fetch-metric", "inv-metric", 2)
+            runtime.wait_for_end("inv-metric", 2)
+            second = runtime.metrics_for("inv-metric", 2)
+            check(len(second) == 1 and second[0]["id"] > metric["id"], "second metric %r" % second)
+
+    if runtime_cache:
+        stub = StubRuntimeCache()
+
+        def cache_call(path, invocation_id, request_id, headers=None, method=None):
+            status, body = runtime.request(path, invocation_id, request_id, headers, method=method)
+            check(status == 200, "%s status %r" % (path, status))
+            runtime.wait_for_end(invocation_id, request_id)
+            check(RUNTIME_CACHE_AUTHORIZATION.split(" ")[1].encode() not in body,
+                  "%s returned the cache credentials: %r" % (path, body))
+            payload = json.loads(body)
+            check("error" not in payload, "%s error %r" % (path, payload))
+            return payload
+
+        @test("Runtime Cache: set, get and expireTag with the in-memory fallback")
+        def _():
+            stub.take_requests()
+            check(cache_call("/cache/harness", "inv-cache", 1).get("hit") is False, "expected a miss before set")
+            stored = cache_call("/cache/harness?value=hello%20swift&ttl=60&tags=t1,t2", "inv-cache", 2, method="PUT")
+            check(stored.get("value") == "hello swift" and stored.get("tags") == ["t1", "t2"], "set %r" % stored)
+            found = cache_call("/cache/harness", "inv-cache", 3)
+            check(found.get("hit") is True and found.get("value") == "hello swift", "get %r" % found)
+            cache_call("/cache-expire/t2", "inv-cache", 4, method="POST")
+            check(cache_call("/cache/harness", "inv-cache", 5).get("hit") is False, "expected a miss after expireTag")
+            # No cache configuration with the requests: nothing may reach a cache service.
+            check(not stub.take_requests(), "the in-memory fallback contacted the cache service")
+
+        def check_cache_service(hidden):
+            invocation_id = "inv-sc-hidden" if hidden else "inv-sc-visible"
+            key = "harness-hidden" if hidden else "harness-visible"
+            configuration = {
+                "x-vercel-sc-host": "127.0.0.1:%d" % stub.port,
+                "x-vercel-sc-protocol": "http",
+                "x-vercel-sc-basepath": "/base",
+                "x-vercel-sc-headers": json.dumps({"authorization": RUNTIME_CACHE_AUTHORIZATION}),
+            }
+            if hidden:
+                configuration.update({"x-vercel-sc-no-header-leak": "1", "x-vercel-sc-runtime-cache": "1"})
+
+            # Which x-vercel-sc-* headers the app sees (names only).
+            payload = cache_call("/request-context", invocation_id, 1, configuration)
+            visible = sorted(name for name in payload["headers"] if name.startswith("x-vercel-sc-"))
+            if hidden:
+                check(not visible, "sc headers leaked despite no-leak: %r" % visible)
+            else:
+                expected = sorted(name for name in configuration if name != "x-vercel-sc-runtime-cache")
+                check(visible == expected, "visible sc headers %r, expected %r" % (visible, expected))
+
+            prefix = "/base/v1/suspense-cache/"
+            suffix = "$" + runtime_cache_key_hash(key)
+            stub.take_requests()
+
+            def one_request(method, label):
+                requests = stub.take_requests()
+                check(len(requests) == 1, "%s: expected one cache request, got %r" % (label, requests))
+                request_method, path, headers, body = requests[0]
+                check(request_method == method, "%s: method %r" % (label, request_method))
+                check(headers.get("authorization") == RUNTIME_CACHE_AUTHORIZATION, "%s: authorization %r" % (label, headers))
+                for name in ("x-vercel-internal-sc-client-origin", "x-vercel-internal-sc-client-name"):
+                    check(headers.get(name) == "RUNTIME_CACHE", "%s: %s %r" % (label, name, headers.get(name)))
+                return path, headers, body
+
+            def entry_path(path, label):
+                check(path.startswith(prefix) and path.endswith(suffix) and "/" not in path[len(prefix):],
+                      "%s: path %r, expected %s<namespace>%s" % (label, path, prefix, suffix))
+
+            check(cache_call("/cache/%s" % key, invocation_id, 2, configuration).get("hit") is False, "expected a miss")
+            path, _, _ = one_request("GET", "get")
+            entry_path(path, "get")
+            metrics = runtime.metrics_for(invocation_id, 2)
+            check(any(metric["host"] == "127.0.0.1:%d" % stub.port and metric["pathname"] == path and metric["statusCode"] == 404
+                      for metric in metrics), "no fetch-metric for the cache request: %r" % metrics)
+
+            stored = cache_call("/cache/%s?value=hello%%20swift&ttl=60&tags=t1,t2" % key, invocation_id, 3, configuration, method="PUT")
+            check(stored.get("value") == "hello swift", "set %r" % stored)
+            path, headers, body = one_request("POST", "set")
+            entry_path(path, "set")
+            check(json.loads(body) == "hello swift", "set body %r" % body)
+            check(headers.get("x-vercel-revalidate") == "60", "set ttl %r" % headers)
+            check(headers.get("x-vercel-cache-tags") == "t1,t2", "set tags %r" % headers)
+            check(headers.get("x-vercel-cache-item-name") == key, "set name %r" % headers)
+
+            found = cache_call("/cache/%s" % key, invocation_id, 4, configuration)
+            check(found.get("hit") is True and found.get("value") == "hello swift", "get after set %r" % found)
+            one_request("GET", "get after set")
+
+            cache_call("/cache-expire/t2", invocation_id, 5, configuration, method="POST")
+            path, _, _ = one_request("POST", "expireTag")
+            check(path == prefix + "revalidate?tags=t2", "expireTag path %r" % path)
+
+            check(cache_call("/cache/%s" % key, invocation_id, 6, configuration).get("hit") is False, "expected a miss after expireTag")
+            one_request("GET", "get after expireTag")
+
+        @test("Runtime Cache: uses Vercel's cache service from visible x-vercel-sc-* headers")
+        def _():
+            check_cache_service(hidden=False)
+
+        @test("Runtime Cache: uses Vercel's cache service when the bootstrap hides x-vercel-sc-* headers")
+        def _():
+            check_cache_service(hidden=True)
+
+    if vercel_modules:
+        @test("OIDC: token claims from the request, never the token")
+        def _():
+            def segment(value):
+                return base64.urlsafe_b64encode(json.dumps(value).encode()).rstrip(b"=").decode()
+            token = "%s.%s.signature" % (segment({"alg": "RS256"}), segment({
+                "iss": "https://oidc.vercel.com/acme", "sub": "owner:acme:project:hello:environment:preview",
+                "aud": "https://vercel.com/acme", "exp": 4102444800, "project_id": "prj_1", "environment": "preview"}))
+            status, body = runtime.request("/oidc", "inv-oidc", 1, {"x-vercel-internal-oidc-token": token})
+            check(status == 200, "status %r" % status)
+            check(token.encode() not in body, "the token must not be returned")
+            payload = json.loads(body)
+            check(payload.get("source") == "request", "source %r" % payload)
+            check(payload.get("issuer") == "https://oidc.vercel.com/acme", "issuer %r" % payload)
+            check(payload.get("audience") == ["https://vercel.com/acme"], "audience %r" % payload)
+            check(payload.get("expiresAt") == 4102444800 and payload.get("expired") is False, "expiry %r" % payload)
+            check(payload.get("projectID") == "prj_1" and payload.get("environment") == "preview", "claims %r" % payload)
+            runtime.wait_for_end("inv-oidc", 1)
+
+        @test("Global Config: reports a missing EDGE_CONFIG instead of failing")
+        def _():
+            status, body = runtime.request("/global-config/flag", "inv-gc", 1)
+            check(status == 200, "status %r" % status)
+            check("EDGE_CONFIG is not set" in json.loads(body).get("error", ""), "payload %r" % body)
+            runtime.wait_for_end("inv-gc", 1)
 
     @test("404 still sends end")
     def _():
@@ -590,12 +896,14 @@ def main():
         for i in ids:
             check(runtime.wait_for_end("inv-b", i) == 1, "duplicate end for %d" % i)
 
-    @test("every log belongs to a request that ended, and no unexpected messages")
+    @test("every log and metric belongs to a request that ended, before its end, and no unexpected messages")
     def _():
         with runtime.lock:
-            orphans = [key for key in runtime.logs if key not in runtime.ends]
+            orphans = [key for key in list(runtime.logs) + list(runtime.metrics) if key not in runtime.ends]
+            after_end = list(runtime.after_end)
             other = list(runtime.other_messages)
-        check(not orphans, "logs for requests that never ended: %r" % orphans)
+        check(not orphans, "logs or metrics for requests that never ended: %r" % orphans)
+        check(not after_end, "logs or metrics after their request's end: %r" % after_end)
         check(not other, "unexpected: %r" % other)
 
     @test("exits cleanly on SIGTERM")

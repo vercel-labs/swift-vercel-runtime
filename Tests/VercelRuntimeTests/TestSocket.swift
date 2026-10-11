@@ -88,6 +88,14 @@ final class TestSocket: @unchecked Sendable {
         }
     }
 
+    /// Closes the connection, like a peer that exits.
+    func closePeer() {
+        if peer >= 0 {
+            close(peer)
+            peer = -1
+        }
+    }
+
     /// Sends raw bytes to the function process.
     func sendRaw(_ bytes: [UInt8]) {
         bytes.withUnsafeBytes { _ = write(peer, $0.baseAddress, $0.count) }

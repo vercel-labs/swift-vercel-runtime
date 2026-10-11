@@ -37,16 +37,19 @@ package final class IPCConnection: Sendable {
     package convenience init(
         path: String,
         eventLoopGroup: any EventLoopGroup = MultiThreadedEventLoopGroup.singleton,
-        onFrame: @escaping @Sendable (ByteBuffer) -> Void = { _ in }
+        onFrame: @escaping @Sendable (ByteBuffer) -> Void = { _ in },
+        onClose: @escaping @Sendable () -> Void = {}
     ) throws {
-        try self.init(descriptor: unixConnect(path: path), eventLoopGroup: eventLoopGroup, onFrame: onFrame)
+        try self.init(descriptor: unixConnect(path: path), eventLoopGroup: eventLoopGroup, onFrame: onFrame, onClose: onClose)
     }
 
-    /// Takes ownership of an already connected socket.
+    /// Takes ownership of an already connected socket. `onClose` runs once the connection has
+    /// closed, for whatever reason; no more frames are delivered after it.
     package init(
         descriptor: CInt,
         eventLoopGroup: any EventLoopGroup = MultiThreadedEventLoopGroup.singleton,
-        onFrame: @escaping @Sendable (ByteBuffer) -> Void = { _ in }
+        onFrame: @escaping @Sendable (ByteBuffer) -> Void = { _ in },
+        onClose: @escaping @Sendable () -> Void = {}
     ) {
         let outbox = IPCOutbox()
         self.outbox = outbox
@@ -54,6 +57,7 @@ package final class IPCConnection: Sendable {
         // task-locals or priority.
         self.task = Task.detached {
             await Self.run(descriptor: descriptor, eventLoopGroup: eventLoopGroup, outbox: outbox, onFrame: onFrame)
+            onClose()
         }
     }
 
@@ -113,7 +117,7 @@ package final class IPCConnection: Sendable {
 
                     while let batch = await outbox.nextBatch() {
                         if batch.droppedLogs > 0 {
-                            writeToStandardError("[vercel] dropped \(batch.droppedLogs) log messages: the receiver was not reading fast enough")
+                            writeToStandardError("[vercel] dropped \(batch.droppedLogs) log or metric messages: the receiver was not reading fast enough")
                         }
                         try await channel.writeAndFlush(batch.bytes).get()
                         outbox.batchWritten()

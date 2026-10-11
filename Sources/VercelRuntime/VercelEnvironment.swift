@@ -1,3 +1,5 @@
+import VercelProtocol
+
 /// Vercel's system environment variables, typed.
 ///
 /// Matches `getEnv()` from `@vercel/functions`: empty values are treated as unset. System

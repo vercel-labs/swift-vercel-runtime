@@ -29,6 +29,9 @@ let package = Package(
                 .product(name: "Vapor", package: "vapor"),
                 // Optional: per-request logs, waitUntil and request helpers.
                 .product(name: "VercelRuntime", package: "swift-vercel-runtime"),
+                // Optional: the Vercel Runtime Cache. Add only the feature modules you use, or all of
+                // them with the "Vercel" product.
+                .product(name: "VercelCache", package: "swift-vercel-runtime"),
             ]
         ),
     ]

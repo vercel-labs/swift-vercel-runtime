@@ -1,5 +1,36 @@
 # Changelog
 
+## Unreleased
+
+New optional products for Vercel features, each its own library so apps only link what they use.
+See "Optional Vercel features" in the README.
+
+- `VercelCache`: the Vercel Runtime Cache (`RuntimeCache`), like `getCache()` from
+  `@vercel/functions` and sharing entries with it: `Codable` values with TTLs and tags (dates
+  encoded like Node's `JSON.stringify`, customizable with `encoder:`/`decoder:`), and an in-memory
+  fallback locally.
+- `VercelGlobalConfig`: reads Global Config (formerly Edge Config) stores (`GlobalConfig`), like
+  `@vercel/edge-config`: `get`, `has`, `getAll` and `digest`, typed or as `GlobalConfigValue`.
+- `VercelFirewall`: rate limiting with Vercel Firewall rules (`Firewall.checkRateLimit`, returning
+  a `RateLimitResult` with an optional `RateLimitResult.Reason`), like `@vercel/firewall`.
+- `VercelOIDC`: the request's OIDC token and its claims (`OIDC.token()`, `VercelOIDCToken`), token
+  exchange for other audiences (`OIDC.exchange`), and AWS credentials from STS
+  (`AWSCredentialsProvider`, `OIDC.awsCredentials`).
+- Each feature module throws its own error type (`RuntimeCacheError`, `GlobalConfigError`,
+  `VercelFirewallError`, `VercelOIDCError`) with `timedOut`, `requestFailed` and an unexpected
+  status case. Descriptions, `dump` and debug output of credentials, tokens and clients never
+  show secrets.
+- `Vercel`: everything above plus `VercelRuntime`, with one `import Vercel`.
+- `VercelRuntime`: `Vercel.withRequest` now also works locally and sets `Vercel.currentRequest`,
+  which the feature modules use to find the request's headers. `Vercel.deadline` and
+  `request.headers.vercel.deadline` give the request's deadline. `Vercel.reportFetch` shows
+  outbound requests under External APIs in Observability; the feature modules report theirs
+  automatically.
+- `VercelBootstrap`: passes the request deadline to the app as `x-vercel-deadline` (replacing any
+  sent by a client), forwards fetch metrics, and hands runtime cache configuration that Vercel
+  hides from request headers to the app over its socket (asked once per request, with a 1 second
+  timeout). It no longer depends on `VercelRuntime`, so it stays small.
+
 ## 0.4.0
 
 - Git deployments: `scripts/vercel-install-swift.sh`, used as a project's Install Command, installs

@@ -1,5 +1,5 @@
 import Synchronization
-import VercelRuntime
+import VercelProtocol
 
 /// The app's side of the bootstrap socket, as seen by the tracker.
 package protocol AppPeer: AnyObject, Sendable {
@@ -14,6 +14,8 @@ package protocol AppPeer: AnyObject, Sendable {
 package final class RequestTracker: Sendable {
     private struct Entry {
         var context: InvocationContext
+        /// Runtime cache configuration hidden from the app, handed to it on request.
+        var runtimeCache: [String: String]
         var responseFinished = false
     }
 
@@ -32,11 +34,14 @@ package final class RequestTracker: Sendable {
     }
 
     /// Starts tracking a request from the runtime. Returns the token the app sees for it.
-    package func begin(_ context: InvocationContext) -> String {
+    ///
+    /// `runtimeCache` is the runtime cache configuration hidden from the app's headers; the app
+    /// can ask for it with ``runtimeCacheFields(token:)`` while the request is tracked.
+    package func begin(_ context: InvocationContext, runtimeCache: [String: String] = [:]) -> String {
         state.withLock { state in
             state.nextToken += 1
             let token = String(state.nextToken)
-            state.entries[token] = Entry(context: context)
+            state.entries[token] = Entry(context: context, runtimeCache: runtimeCache)
             state.tokens[context] = token
             return token
         }
@@ -85,6 +90,20 @@ package final class RequestTracker: Sendable {
         } else {
             writeLine("\(level.rawValue): \(message)", to: level == .error || level == .fatal ? 2 : 1)
         }
+    }
+
+    /// An outbound HTTP request the app made for a request. Dropped if the request already ended:
+    /// the runtime only accepts metrics for requests it is still running.
+    package func fetchMetric(token: String, metric: FetchMetric) {
+        if let context = state.withLock({ $0.entries[token]?.context }) {
+            sendToRuntime(.fetchMetric(context, metric))
+        }
+    }
+
+    /// The runtime cache configuration hidden from the app for a request. Empty if the request is
+    /// not tracked (anymore) or had none.
+    package func runtimeCacheFields(token: String) -> [String: String] {
+        state.withLock { $0.entries[token]?.runtimeCache } ?? [:]
     }
 
     /// The runtime is about to time the request out; tell the app to cancel its background work.

@@ -11,6 +11,7 @@ responses, WebSockets and concurrent requests included.
 | --- | --- |
 | `VercelPlugin` | `swift package vercel`: builds `.vercel/output` for `vercel deploy --prebuilt` |
 | `VercelRuntime` | Optional: per-request logs, `waitUntil`, request helpers (geolocation, IP, OIDC), environment |
+| `VercelCache`, `VercelGlobalConfig`, `VercelFirewall`, `VercelOIDC` | Optional: Runtime Cache, Global Config, rate limiting, OIDC and AWS credentials. `Vercel` includes them all. See [Optional Vercel features](#optional-vercel-features) |
 | `VercelBootstrap` | The function's entrypoint. Built and deployed by the plugin; you never import it |
 
 ## How it works
@@ -223,25 +224,82 @@ dependency besides the build plugin.
 
 ## Optional Vercel features
 
-You do not need `VercelRuntime` to run on Vercel: without it your app gets routing, streaming,
+You do not need any of these to run on Vercel: without them your app gets routing, streaming,
 WebSockets, cron protection and graceful shutdown, and everything it prints reaches Vercel's logs.
-Add it for features that need to know which request your code is running for:
+Add them for Vercel features beyond that. Each is a separate product, so you only link what you use:
+
+| Product | Import | Adds |
+| --- | --- | --- |
+| `VercelRuntime` | `import VercelRuntime` | Per-request logs, `waitUntil`, request helpers, deadline, environment, outbound request metrics |
+| `VercelCache` | `import VercelCache` | [Runtime Cache](#runtime-cache): a regional key-value cache with TTLs and tags |
+| `VercelGlobalConfig` | `import VercelGlobalConfig` | [Global Config](#global-config) reads (formerly Edge Config) |
+| `VercelFirewall` | `import VercelFirewall` | [Rate limiting](#rate-limiting) with Vercel Firewall rules |
+| `VercelOIDC` | `import VercelOIDC` | [OIDC](#oidc) tokens, token exchange and AWS credentials |
+| `Vercel` | `import Vercel` | Everything above |
+
+Add the products to your target, either everything or only the ones you use:
 
 ```swift
-.product(name: "VercelRuntime", package: "swift-vercel-runtime"),
+.executableTarget(name: "App", dependencies: [
+    .product(name: "Hummingbird", package: "hummingbird"),
+    .product(name: "Vercel", package: "swift-vercel-runtime"),
+    // Or individually, for example:
+    // .product(name: "VercelRuntime", package: "swift-vercel-runtime"),
+    // .product(name: "VercelCache", package: "swift-vercel-runtime"),
+]),
 ```
+
+`VercelCache`, `VercelGlobalConfig`, `VercelFirewall` and `VercelOIDC` build on `VercelRuntime`
+and make their requests with AsyncHTTPClient.
 
 | Feature | API | Needs `Vercel.withRequest`? |
 | --- | --- | --- |
 | Logs attributed to their request, with levels | `VercelLogHandler` | Yes |
 | Background work after the response | `Vercel.waitUntil(for: request.headers)` | No |
 | | `Vercel.waitUntil { }` | Yes |
-| Geolocation, IP, request id, OIDC token | `request.headers.vercel` | No |
+| Geolocation, IP, request id, OIDC token, deadline | `request.headers.vercel` | No |
+| | `Vercel.currentRequest`, `Vercel.deadline` | Yes |
+| Outbound requests in Observability (External APIs) | `Vercel.reportFetch(...)` | Yes |
 | Deployment environment | `VercelEnvironment.current` | No |
+| Runtime Cache | `RuntimeCache()` | Yes, or pass `headers:` |
+| Global Config | `GlobalConfig.default` | No |
+| Rate limiting | `Firewall.checkRateLimit(_:)` | Yes, or pass `headers:` |
+| OIDC tokens and AWS credentials | `OIDC.token()`, `AWSCredentialsProvider` | Yes, or pass `headers:` |
 
-Everything below is a no-op or falls back to plain behavior locally, so the same code runs
-everywhere. Apps only connect to the bootstrap the first time they use `Vercel.withRequest` or
+Everything below also works locally, so the same code runs everywhere: request-bound features are
+no-ops or fall back to plain behavior (the Runtime Cache to an in-memory cache, rate limit checks to
+"not limited"), and Global Config and OIDC read the variables `vercel env pull` writes to
+`.env.local`. Apps only connect to the bootstrap the first time they use `Vercel.withRequest` or
 `Vercel.waitUntil(for:)`; until then, requests end as soon as their response is done.
+
+### The request middleware
+
+Most features need to know which request your code is running for. Run your handlers inside
+`Vercel.withRequest`, typically from a middleware:
+
+```swift
+import VercelRuntime
+
+// Hummingbird
+struct VercelRequestMiddleware<Context: RequestContext>: RouterMiddleware {
+    func handle(_ request: Request, context: Context, next: (Request, Context) async throws -> Response) async throws -> Response {
+        try await Vercel.withRequest(request.headers) { try await next(request, context) }
+    }
+}
+router.add(middleware: VercelRequestMiddleware())
+
+// Vapor
+struct VercelRequestMiddleware: Middleware {
+    func respond(to request: Request, chainingTo next: any Responder) async throws -> Response {
+        try await Vercel.withRequest(request.headers) { try await next.respond(to: request) }
+    }
+}
+app.middleware.use(VercelRequestMiddleware())
+```
+
+`withRequest` takes the request's `HTTPFields`, so it works the same with any framework built on
+swift-http-types. Code that runs after the handler returns, like a streamed response body or a
+WebSocket, runs outside the request.
 
 ### Logs
 
@@ -250,58 +308,34 @@ swift-log backend, shows up in Vercel's logs. Those lines are not tied to a requ
 makes them hard to follow when one instance serves many requests at once.
 
 To group logs by request, use `VercelLogHandler`, a swift-log backend. Inside `Vercel.withRequest`
-it sends each log to Vercel with its level and the request it belongs to; everywhere else (startup,
-background tasks, local development) it writes a line to stdout, or stderr for `error` and above.
-The level defaults to `LOG_LEVEL`, or `info`. It takes two steps.
+(for example with [the request middleware](#the-request-middleware)) it sends each log to Vercel
+with its level and the request it belongs to; everywhere else (startup, background tasks, local
+development) it writes a line to stdout, or stderr for `error` and above. The level defaults to
+`LOG_LEVEL`, or `info`.
 
-1. Install it as your swift-log backend. swift-log allows this exactly once per process, at the
-   start of `main`:
+Install it as your swift-log backend. swift-log allows this exactly once per process, at the start
+of `main`:
 
-   ```swift
-   VercelLogHandler.bootstrap()
-   ```
+```swift
+VercelLogHandler.bootstrap()
+```
 
-   If your app already calls `LoggingSystem.bootstrap` (many app templates do), do not call both:
-   swift-log stops the process on a second call. Add `VercelLogHandler` to your existing setup
-   instead, with `MultiplexLogHandler`:
+If your app already calls `LoggingSystem.bootstrap` (many app templates do), do not call both:
+swift-log stops the process on a second call. Add `VercelLogHandler` to your existing setup instead,
+with `MultiplexLogHandler`:
 
-   ```swift
-   LoggingSystem.bootstrap { label in
-       MultiplexLogHandler([
-           VercelLogHandler(label: label),
-           MyServiceLogHandler(label: label),  // your existing backend, for example a log service
-       ])
-   }
-   ```
+```swift
+LoggingSystem.bootstrap { label in
+    MultiplexLogHandler([
+        VercelLogHandler(label: label),
+        MyServiceLogHandler(label: label),  // your existing backend, for example a log service
+    ])
+}
+```
 
-   `VercelLogHandler` already writes to stdout outside requests, so it replaces swift-log's
-   default `StreamLogHandler`. Combining the two prints every line twice.
-
-2. Run your handlers inside `Vercel.withRequest`, typically from a middleware:
-
-   ```swift
-   import VercelRuntime
-
-   // Hummingbird
-   struct VercelRequestMiddleware<Context: RequestContext>: RouterMiddleware {
-       func handle(_ request: Request, context: Context, next: (Request, Context) async throws -> Response) async throws -> Response {
-           try await Vercel.withRequest(request.headers) { try await next(request, context) }
-       }
-   }
-   router.add(middleware: VercelRequestMiddleware())
-
-   // Vapor
-   struct VercelRequestMiddleware: Middleware {
-       func respond(to request: Request, chainingTo next: any Responder) async throws -> Response {
-           try await Vercel.withRequest(request.headers) { try await next.respond(to: request) }
-       }
-   }
-   app.middleware.use(VercelRequestMiddleware())
-   ```
-
-   `withRequest` takes the request's `HTTPFields`, so it works the same with any framework built on
-   swift-http-types. Logs from code that runs after the handler returns, like a streamed response
-   body or a WebSocket, are not attributed.
+`VercelLogHandler` already writes to stdout outside requests, so it replaces swift-log's default
+`StreamLogHandler`. Combining the two prints every line twice. Logs from code that runs after the
+handler returns, like a streamed response body or a WebSocket, are not attributed.
 
 ### waitUntil
 
@@ -312,7 +346,8 @@ Vercel.waitUntil(for: request.headers) {
 ```
 
 Runs work after the response is sent, and keeps the function alive until it finishes. Inside
-`Vercel.withRequest` (for example with the middleware above), `Vercel.waitUntil { ... }` works
+`Vercel.withRequest` (for example with [the request middleware](#the-request-middleware)),
+`Vercel.waitUntil { ... }` works
 without passing the headers. When the request approaches its maximum duration the work is
 cancelled, so check `Task.isCancelled` in long loops. Logs from the work stay attributed to the
 request.
@@ -339,6 +374,7 @@ vercel.geolocation   // city, country, flag, countryRegion, region, latitude, lo
 vercel.ipAddress     // x-real-ip
 vercel.id            // x-vercel-id, as shown in Vercel's logs
 vercel.oidcToken     // per-request OIDC token, or VERCEL_OIDC_TOKEN
+vercel.deadline      // when Vercel stops the request (x-vercel-deadline), as a Date
 
 let environment = VercelEnvironment.current
 environment.target       // .production, .preview or .development (VERCEL_ENV)
@@ -348,7 +384,165 @@ environment.git.commitSHA
 ```
 
 These match `geolocation`, `ipAddress` and `getEnv` from `@vercel/functions`, and work on any
-`HTTPFields` (`request.headers` in Vapor 5 and Hummingbird 2).
+`HTTPFields` (`request.headers` in Vapor 5 and Hummingbird 2). Inside `Vercel.withRequest`,
+`Vercel.currentRequest` gives the same helpers for the request being handled without passing its
+headers around (like `getContext().headers`), and `Vercel.deadline` is its deadline.
+
+### Deadline
+
+```swift
+// Skip optional work when Vercel stops the request in less than 5 seconds.
+if let deadline = Vercel.deadline, deadline.timeIntervalSinceNow < 5 {
+    return partialResults
+}
+```
+
+`Vercel.deadline` (or `request.headers.vercel.deadline` outside `Vercel.withRequest`) is when
+Vercel stops the request, at the function's maximum duration. The bootstrap passes it to your app
+as `x-vercel-deadline`, replacing any value a client sent. It is `nil` locally.
+
+### Outbound request metrics
+
+Requests made by `VercelCache`, `VercelGlobalConfig`, `VercelFirewall` and `VercelOIDC` show up
+under External APIs in Vercel's Observability automatically. Report your own requests with
+`Vercel.reportFetch`:
+
+```swift
+let clock = ContinuousClock()
+let started = clock.now
+let response = try await client.execute(request)
+Vercel.reportFetch(
+    method: "GET", host: "api.example.com", path: "/v1/users", query: "page=2",
+    statusCode: Int(response.status.code), duration: clock.now - started
+)
+```
+
+The request is attributed to the current request. Call it inside `Vercel.withRequest`; elsewhere,
+and locally, it does nothing. The feature modules' requests are also reported when you pass the
+request's `headers:` explicitly instead.
+
+### Runtime Cache
+
+```swift
+import VercelCache
+
+struct Product: Codable { var id: String; var name: String; var price: Int }
+
+let cache = RuntimeCache(namespace: "products")
+
+func product(id: String) async throws -> Product {
+    if let cached = try? await cache.get(id, as: Product.self) {
+        return cached
+    }
+    let product = try await database.product(id: id)
+    try? await cache.set(id, product, ttl: .seconds(300), tags: ["products"])
+    return product
+}
+
+// After the catalog changes:
+try await cache.expireTag("products")
+```
+
+The Runtime Cache is a key-value cache shared by every instance of your function in a region, with
+TTLs and tag invalidation, like `getCache()` from `@vercel/functions`. Values are any `Codable`
+type, stored as JSON, and keys are hashed the same way as in Node, so Swift and Node functions using
+the same keys and namespace share entries. Dates are stored like Node's `JSON.stringify` writes them
+(`2026-10-11T17:00:00.123Z`, millisecond precision) and read with or without fractional seconds;
+pass `encoder:` and `decoder:` (start from `RuntimeCache.defaultEncoder` and `defaultDecoder` to
+keep that) to change how values are encoded.
+
+Vercel tells each request where the cache is, so use it inside `Vercel.withRequest` or pass
+`RuntimeCache(headers: request.headers)`. Locally, and outside a request, it uses an in-memory
+cache with the same behavior and logs a warning once. Unlike Node, which logs failures and returns
+`null`, operations throw `RuntimeCacheError` when the cache fails or takes longer than 500 ms (set
+`RUNTIME_CACHE_TIMEOUT` in milliseconds to change it); use `try?` as above so an outage does not
+fail the request.
+
+### Global Config
+
+```swift
+import VercelGlobalConfig
+
+let config = try GlobalConfig.default
+
+// A feature flag.
+if try await config.get("newCheckout", as: Bool.self) == true {
+    // ...
+}
+
+// A redirect map stored as {"redirects": {"/old": "/new"}}.
+let redirects = try await config.get("redirects", as: [String: String].self) ?? [:]
+
+// Several items at once, decoded into your own type, or untyped as [String: GlobalConfigValue].
+struct Flags: Decodable { var newCheckout: Bool?; var maintenance: Bool? }
+let flags = try await config.getAll(keys: ["newCheckout", "maintenance"], as: Flags.self)
+```
+
+[Global Config](https://vercel.com/docs/global-config) (formerly Edge Config) is a global store
+for feature flags, redirects and other configuration that changes without a redeploy. Connect a
+store to the project and Vercel sets `EDGE_CONFIG`, which `GlobalConfig.default` reads; use
+`GlobalConfig(connectionString:)` for other stores. `has(_:)` and `digest()` work like in
+`@vercel/edge-config`, and `consistentRead: true` reads the latest value, skipping caches.
+
+Vercel currently provides local, sub-millisecond reads only to Node.js and Bun functions, so reads
+from Swift go to the store's HTTP API, which takes a network round trip. If Vercel ships a snapshot
+of the store to the function, reads use it automatically.
+
+### Rate limiting
+
+```swift
+import VercelFirewall
+
+// Hummingbird
+router.post("login") { request, _ -> Response in
+    let result = try await Firewall.checkRateLimit("login", headers: request.headers)
+    if result.rateLimited {
+        return Response(status: .tooManyRequests)
+    }
+    // ...
+}
+```
+
+Rate limits are rules in the Vercel Firewall, like `checkRateLimit` from `@vercel/firewall`. For
+each limit, open the project's Firewall tab in the Vercel dashboard, add a custom rule with the
+@vercel/firewall (Rate limit API ID) condition and an ID such as `login`, choose the Rate Limit
+action with its window and number of requests, and publish it. Use the same ID in code.
+
+The limit applies per client IP (`x-real-ip`) unless you pass `rateLimitKey:`, for example a user
+ID. An ID without a rule is not limited and `result.reason` is `.notFound`; a request the rule
+blocks is limited with `.blocked`. `headers:` can be omitted inside `Vercel.withRequest`. When not running
+on Vercel, checks log a warning once and return "not limited", unless you pass
+`firewallHostForDevelopment: "my-app.vercel.app"` to check that deployment's rules. Set
+`RATE_LIMIT_SECRET` to mix a secret into the hashed key, and `VERCEL_AUTOMATION_BYPASS_SECRET` if
+the deployment uses Deployment Protection.
+
+### OIDC
+
+```swift
+import VercelOIDC
+
+// The request's OIDC token, for services that trust Vercel's OIDC issuer.
+let token = try OIDC.token()
+let claims = try VercelOIDCToken(token)
+print(claims.projectID ?? "-", claims.environment ?? "-", claims.expiresAt ?? "-")
+
+// A Vercel-issued token for another audience (cached until it expires).
+let apiToken = try await OIDC.exchange(audience: "https://api.example.com")
+
+// Temporary AWS credentials, cached and refreshed before they expire. Create one provider per role.
+let aws = AWSCredentialsProvider(roleARN: "arn:aws:iam::123456789012:role/my-app", region: "us-east-1")
+let credentials = try await aws.credentials()
+// credentials.accessKeyID, credentials.secretAccessKey, credentials.sessionToken
+```
+
+With OIDC enabled in the project settings, Vercel sends a short-lived token with every request
+(`x-vercel-oidc-token`); `OIDC.token()` reads it from the current request, else from
+`VERCEL_OIDC_TOKEN`, which `vercel env pull` writes for local development (pull again when it
+expires, after about 12 hours). Do not store the token. `AWSCredentialsProvider` calls STS
+`AssumeRoleWithWebIdentity` with it, like `awsCredentialsProvider` from `@vercel/functions/oidc`;
+the role's trust policy must allow Vercel's OIDC provider. Its documentation shows how to plug it
+into Soto. `OIDC.awsCredentials(roleARN:)` gets new credentials on every call. Printing or
+`dump`ing credentials, tokens, `GlobalConfig` or `RuntimeCache` never shows secrets.
 
 ## WebSockets
 
@@ -416,7 +610,9 @@ On Vercel the bootstrap is started with `VERCEL_IPC_PATH` set. It:
 3. waits until the app listens (read from `/proc` on Linux), listens on `127.0.0.1:0` and sends
    `server-started` with that port,
 4. for each request: answers `GET /_vercel/ping` itself; removes `x-vercel-internal-*` headers
-   (exposing the OIDC token as `x-vercel-oidc-token`) and the runtime cache headers; adds an opaque
+   (exposing the OIDC token as `x-vercel-oidc-token` and the deadline as `x-vercel-deadline`,
+   replacing any sent by a client) and the runtime cache headers (keeping hidden ones for the app to
+   ask for over its socket); adds an opaque
    `x-vercel-bootstrap-request` token (replacing any sent by a client); proxies the request on a
    dedicated connection to the app; and sends `end` once the response is complete, or right after
    a `101 Switching Protocols`,
@@ -424,7 +620,8 @@ On Vercel the bootstrap is started with `VERCEL_IPC_PATH` set. It:
    an `unrecoverable-error` and exits.
 
 Apps that use `VercelRuntime` connect to `VERCEL_BOOTSTRAP_SOCKET`. The bootstrap then forwards
-their request-attributed logs, and holds each request's `end` until the app reports its `waitUntil`
+their request-attributed logs and fetch metrics, answers their requests for hidden runtime cache
+configuration, and holds each request's `end` until the app reports its `waitUntil`
 work done (or it is cancelled by `approaching-timeout`). Apps that never connect pay nothing for it.
 
 ## Development
@@ -442,12 +639,19 @@ them in an `amazonlinux:2023` container (Docker). CI runs both commands on a Lin
 `scripts/fake-runtime.py` emulates Vercel's runtime: it spawns the function's handler the same way,
 decodes messages with the same strict schema, sends `approaching-timeout`, and checks ping handling,
 the app's environment, header stripping (including runtime cache headers), `end` messages for
-success/404/500/streaming/concurrent requests, per-request logs, `waitUntil` timing and
-cancellation, cron authorization, request helpers, graceful shutdown, and that a crashing app is
-reported. Examples with WebSocket routes also get WebSocket checks: `end` at accept while the
-socket stays open, text and binary echo, declined upgrades, and concurrent connections. The
-Hummingbird example listens on its default port, which checks port discovery, and the SwiftNIO
-example has no Vercel code at all (the harness skips the optional-feature checks for it).
+success/404/500/streaming/concurrent requests, per-request logs and fetch metrics (none after their
+request's `end`), `waitUntil` timing and cancellation, cron authorization, request helpers,
+graceful shutdown, and that a crashing app is reported. Examples with WebSocket routes also get
+WebSocket checks: `end` at accept while the socket stays open, text and binary echo, declined
+upgrades, and concurrent connections. The Hummingbird example listens on its default port, which
+checks port discovery, and also serves routes for the feature modules (`/cache/:key`,
+`/global-config`, `/rate-limit/:id`, `/oidc`) that answer JSON describing what happened, for
+end-to-end tests on a deployment; the harness smoke-tests OIDC claims through them. The Vapor
+example uses `VercelCache` only, which keeps the check that it links no ICU meaningful for the
+feature modules. For both, the harness checks the Runtime Cache routes against its in-memory
+fallback and against a stub of Vercel's cache service, passed as `x-vercel-sc-*` headers that are
+either visible to the app or hidden by the bootstrap. The SwiftNIO example has no Vercel code at
+all (the harness skips the optional-feature checks for it).
 
 ## Known issues
 

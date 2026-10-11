@@ -3,7 +3,7 @@ import FoundationEssentials
 #else
 import Foundation
 #endif
-import VercelRuntime
+import VercelProtocol
 
 /// `vercel-bootstrap.json`, written by the `vercel` plugin next to the bootstrap binary.
 ///

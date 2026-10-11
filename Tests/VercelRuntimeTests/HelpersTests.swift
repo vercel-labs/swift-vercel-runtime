@@ -1,6 +1,7 @@
 import HTTPTypes
 import Logging
 import Testing
+@testable import VercelProtocol
 @testable import VercelRuntime
 
 @Suite struct RequestInfoTests {
