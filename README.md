@@ -1,5 +1,8 @@
 # Swift Vercel Runtime
 
+[![](https://img.shields.io/endpoint?url=https%3A%2F%2Fswiftpackageindex.com%2Fapi%2Fpackages%2Fvercel-labs%2Fswift-vercel-runtime%2Fbadge%3Ftype%3Dswift-versions)](https://swiftpackageindex.com/vercel-labs/swift-vercel-runtime)
+[![](https://img.shields.io/endpoint?url=https%3A%2F%2Fswiftpackageindex.com%2Fapi%2Fpackages%2Fvercel-labs%2Fswift-vercel-runtime%2Fbadge%3Ftype%3Dplatforms)](https://swiftpackageindex.com/vercel-labs/swift-vercel-runtime)
+
 Run Swift servers natively on [Vercel](https://vercel.com). Write a normal Vapor, Hummingbird or
 any other Swift HTTP server that listens on a port: no Vercel-specific code, adapters or
 framework packages. It is cross-compiled with the
