@@ -23,7 +23,8 @@ struct VercelPlugin: CommandPlugin {
                                    vercel.json changes. Options given to init are added to the
                                    Build Command. Also writes the local Swift version to
                                    .swift-version (unless it exists), so Vercel builds with the
-                                   same Swift release.
+                                   same Swift release, and adds .vercel to .gitignore unless Git
+                                   already ignores it.
 
         OPTIONS:
           --product <name>         Executable product to build. Defaults to the package's only
@@ -292,11 +293,28 @@ struct VercelPlugin: CommandPlugin {
         }
         print(SwiftVersionFile.message(for: versionAction))
 
+        // .vercel holds the build output (and `vercel link`'s project.json): keep it out of Git.
+        let gitIgnoreFile = package.directoryURL.appending(path: GitIgnore.name)
+        let existingGitIgnore = FileManager.default.fileExists(atPath: gitIgnoreFile.path())
+            ? try String(contentsOf: gitIgnoreFile, encoding: .utf8)
+            : nil
+        let ignored = isIgnoredByGit(GitIgnore.checkedPath, in: package.directoryURL)
+            ?? existingGitIgnore.map(GitIgnore.ignoresVercelDirectory) ?? false
+        if !ignored {
+            try Data(GitIgnore.addingEntry(to: existingGitIgnore).utf8).write(to: gitIgnoreFile)
+            print(
+                existingGitIgnore == nil
+                    ? "Created .gitignore with .vercel, where the build writes its output."
+                    : "Added .vercel to .gitignore, where the build writes its output."
+            )
+        }
+
+        let commit = ["vercel.json"] + (pinned ? [".swift-version"] : []) + (ignored ? [] : [".gitignore"])
         print(
             """
 
-            Commit \(pinned ? "vercel.json and .swift-version" : "vercel.json") and push: Vercel installs Swift (cached after the
-            first build) and runs `swift package vercel` on every deployment. For a new project, import
+            Commit \(commit.dropLast().joined(separator: ", "))\(commit.count > 1 ? " and " : "")\(commit.last ?? "") and push: Vercel installs Swift (cached after the first
+            build) and runs `swift package vercel` on every deployment. For a new project, import
             the repository at https://vercel.com/new with the Framework Preset "Other", and if
             Package.swift is not at the repository root, set the Root Directory to its folder.
             """
@@ -412,6 +430,29 @@ struct VercelPlugin: CommandPlugin {
                 )
                 return
             }
+        }
+    }
+
+    /// Asks Git whether `path`, relative to `directory`, is ignored by the repository's ignore files.
+    /// Returns `nil` when Git can't answer (not installed, or not in a repository).
+    private func isIgnoredByGit(_ path: String, in directory: URL) -> Bool? {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        // A personal global excludes file doesn't keep the directory out of other clones.
+        process.arguments = ["git", "-c", "core.excludesFile=/dev/null", "check-ignore", "-q", path]
+        process.currentDirectoryURL = directory
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        do {
+            try process.run()
+        } catch {
+            return nil
+        }
+        process.waitUntilExit()
+        switch process.terminationStatus {
+        case 0: return true
+        case 1: return false
+        default: return nil
         }
     }
 
