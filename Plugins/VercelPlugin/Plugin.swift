@@ -15,6 +15,13 @@ struct VercelPlugin: CommandPlugin {
         OVERVIEW: Build a Swift server for Vercel's native `executable` runtime.
 
         USAGE: swift package --disable-sandbox vercel [options]
+               swift package --disable-sandbox vercel init [options]
+
+        SUBCOMMANDS:
+          init                     Set up Git deployments: set the Install and Build Commands in
+                                   vercel.json, creating it if needed. Nothing else in an existing
+                                   vercel.json changes. Options given to init are added to the
+                                   Build Command.
 
         OPTIONS:
           --product <name>         Executable product to build. Defaults to the package's only
@@ -40,43 +47,36 @@ struct VercelPlugin: CommandPlugin {
         the PORT environment variable. Cron jobs are read from `crons` in vercel.json next to
         Package.swift.
 
-        Deploy the result with `vercel deploy --prebuilt`, or let Vercel build it from Git with
-        scripts/vercel-install-swift.sh (see the README).
+        Deploy the result with `vercel deploy --prebuilt`, or run `init` once to let Vercel build it
+        on every push.
         """
 
     func performCommand(context: PluginContext, arguments: [String]) async throws {
-        var extractor = ArgumentExtractor(arguments)
-        if extractor.extractFlag(named: "help") > 0 {
+        if arguments.first == "init" {
+            try initialize(package: context.package, buildOptions: Array(arguments.dropFirst()))
+            return
+        }
+        let options = try BuildOptions(arguments)
+        if options.help {
             print(Self.usage)
             return
         }
 
-        let productName = extractor.extractOption(named: "product").last
-        let architecture = try Architecture(extractor.extractOption(named: "architecture").last ?? "arm64")
-        let requestedSDK = extractor.extractOption(named: "swift-sdk").last
+        let productName = options.productName
+        let architecture = options.architecture
+        let requestedSDK = options.requestedSDK
         let swiftSDK = requestedSDK ?? architecture.staticLinuxSDK
         // The environment fallback is set by the .vercel/bin/swift wrapper that
         // scripts/vercel-install-swift.sh writes for Git deployments.
         let environment = ProcessInfo.processInfo.environment
-        let swiftSDKsPath = extractor.extractOption(named: "swift-sdks-path").last ?? environment["SWIFT_VERCEL_SDKS_PATH"]
-        let configuration = extractor.extractOption(named: "configuration").last ?? "release"
-        let outputPath = extractor.extractOption(named: "output").last ?? ".vercel/output"
-        let staticDirectory = extractor.extractOption(named: "static-dir").last
-        let memory = try extractor.extractOption(named: "memory").last.map { try positiveInteger($0, option: "memory") }
-        let maxDuration = try extractor.extractOption(named: "max-duration").last.map {
-            try positiveInteger($0, option: "max-duration")
-        }
-        let regions = extractor.extractOption(named: "region")
-        let strip = extractor.extractFlag(named: "no-strip") == 0
-
-        guard ["release", "debug"].contains(configuration) else {
-            throw PluginError.invalidArgument("--configuration must be release or debug, got '\(configuration)'")
-        }
-        if !extractor.remainingArguments.isEmpty {
-            throw PluginError.invalidArgument(
-                "unknown arguments: \(extractor.remainingArguments.joined(separator: " "))\n\n\(Self.usage)"
-            )
-        }
+        let swiftSDKsPath = options.swiftSDKsPath ?? environment["SWIFT_VERCEL_SDKS_PATH"]
+        let configuration = options.configuration
+        let outputPath = options.outputPath
+        let staticDirectory = options.staticDirectory
+        let memory = options.memory
+        let maxDuration = options.maxDuration
+        let regions = options.regions
+        let strip = options.strip
 
         let packageDirectory = context.package.directoryURL
         let product = try executableProduct(named: productName, in: context.package)
@@ -213,6 +213,63 @@ struct VercelPlugin: CommandPlugin {
         if !insideVercelBuild {
             print("Deploy with: vercel deploy --prebuilt")
         }
+    }
+
+    /// `swift package vercel init [build options]`: sets the Install and Build Commands for Git
+    /// deployments in vercel.json next to Package.swift. Creates the file if needed; in an existing
+    /// one, only those two settings change.
+    private func initialize(package: Package, buildOptions: [String]) throws {
+        let options = try BuildOptions(buildOptions)
+        if options.help {
+            print(Self.usage)
+            return
+        }
+        // A missing or ambiguous product would otherwise only fail in the first deployment.
+        _ = try executableProduct(named: options.productName, in: package)
+
+        let file = package.directoryURL.appending(path: "vercel.json")
+        let original = FileManager.default.fileExists(atPath: file.path())
+            ? try String(contentsOf: file, encoding: .utf8)
+            : nil
+        let settings = [
+            (key: "installCommand", value: VercelJSON.installCommand),
+            (key: "buildCommand", value: VercelJSON.buildCommand(options: buildOptions)),
+        ]
+        let edit: (text: String, changes: [(key: String, change: VercelJSON.Change)])
+        do {
+            edit = try VercelJSON.setting(settings, in: original)
+        } catch let error as VercelJSON.EditError {
+            throw PluginError.invalidArgument(
+                """
+                \(error), so it was not changed. Add these settings to it:
+
+                    "installCommand": "\(settings[0].value)",
+                    "buildCommand": "\(settings[1].value)"
+                """
+            )
+        }
+
+        if edit.changes.allSatisfy({ $0.change == .unchanged }) {
+            print("vercel.json already has the Install and Build Commands for Git deployments.")
+        } else {
+            try Data(edit.text.utf8).write(to: file)
+            print(original == nil ? "Created vercel.json:" : "Updated vercel.json (nothing else in it changed):")
+            for (key, value) in settings {
+                switch edit.changes.first(where: { $0.key == key })?.change {
+                case .updated(let previous): print("  \(key): \(value)\n    (was: \(previous))")
+                default: print("  \(key): \(value)")
+                }
+            }
+        }
+        print(
+            """
+
+            Commit vercel.json and push: Vercel installs Swift (cached after the first build) and runs
+            `swift package vercel` on every deployment. For a new project, import the repository at
+            https://vercel.com/new with the Framework Preset "Other", and if Package.swift is not at
+            the repository root, set the Root Directory to its folder.
+            """
+        )
     }
 
     /// The bootstrap product in this package, and its file name in the function.
@@ -359,8 +416,51 @@ struct VercelPlugin: CommandPlugin {
         let basePath = base.path().hasSuffix("/") ? base.path() : base.path() + "/"
         return path.hasPrefix(basePath) ? String(path.dropFirst(basePath.count)) : path
     }
+}
 
-    private func positiveInteger(_ value: String, option: String) throws -> Int {
+/// The build options, shared by the build and by `init` (which adds them to the Build Command).
+struct BuildOptions {
+    var help: Bool
+    var productName: String?
+    var architecture: Architecture
+    var requestedSDK: String?
+    var swiftSDKsPath: String?
+    var configuration: String
+    var outputPath: String
+    var staticDirectory: String?
+    var memory: Int?
+    var maxDuration: Int?
+    var regions: [String]
+    var strip: Bool
+
+    init(_ arguments: [String]) throws {
+        var extractor = ArgumentExtractor(arguments)
+        help = extractor.extractFlag(named: "help") > 0
+        productName = extractor.extractOption(named: "product").last
+        architecture = try Architecture(extractor.extractOption(named: "architecture").last ?? "arm64")
+        requestedSDK = extractor.extractOption(named: "swift-sdk").last
+        swiftSDKsPath = extractor.extractOption(named: "swift-sdks-path").last
+        configuration = extractor.extractOption(named: "configuration").last ?? "release"
+        outputPath = extractor.extractOption(named: "output").last ?? ".vercel/output"
+        staticDirectory = extractor.extractOption(named: "static-dir").last
+        memory = try extractor.extractOption(named: "memory").last.map { try Self.positiveInteger($0, option: "memory") }
+        maxDuration = try extractor.extractOption(named: "max-duration").last.map {
+            try Self.positiveInteger($0, option: "max-duration")
+        }
+        regions = extractor.extractOption(named: "region")
+        strip = extractor.extractFlag(named: "no-strip") == 0
+
+        guard ["release", "debug"].contains(configuration) else {
+            throw PluginError.invalidArgument("--configuration must be release or debug, got '\(configuration)'")
+        }
+        if !extractor.remainingArguments.isEmpty {
+            throw PluginError.invalidArgument(
+                "unknown arguments: \(extractor.remainingArguments.joined(separator: " "))\n\n\(VercelPlugin.usage)"
+            )
+        }
+    }
+
+    private static func positiveInteger(_ value: String, option: String) throws -> Int {
         guard let number = Int(value), number > 0 else {
             throw PluginError.invalidArgument("--\(option) must be a positive integer, got '\(value)'")
         }
