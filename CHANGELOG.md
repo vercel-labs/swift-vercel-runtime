@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.6.1
 
 - `swift package --disable-sandbox vercel init` adds `.vercel` to `.gitignore` (creating it if
   needed) unless Git already ignores it, including through a parent directory's `.gitignore`.
