@@ -22,7 +22,10 @@
 #
 # Environment:
 #   SWIFT_VERSION                    Swift release, like 6.4.0 or 6.4 (latest 6.4.x). Defaults to
-#                                    the project's .swift-version file, then the latest release.
+#                                    the project's .swift-version file (which `vercel init` writes
+#                                    with the local Swift version), then the latest release. Each
+#                                    version has its own cache, so the first build after a change
+#                                    (or after a new release, without a pin) is a cold one.
 #   SWIFT_VERCEL_MAX_BUILD_CACHE_MB  Largest build directory to keep cached (default 2000).
 set -euo pipefail
 
@@ -73,8 +76,11 @@ read -r VERSION TAG PLATFORM_DIR SDK_VERSION SDK_CHECKSUM < <(
       }
       return 0;
     };
+    // Releases are named like 6.3 or 6.4.0, so compare numbers: 6.3.0 matches 6.3, and 6.4
+    // matches every 6.4.x.
+    const matches = (name) => key(requested).every((n, i) => n === (key(name)[i] ?? 0));
     const candidates = releases
-      .filter((r) => !requested || r.name === requested || r.name.startsWith(requested + "."))
+      .filter((r) => !requested || matches(r.name))
       .filter((r) => r.platforms.some((p) => p.platform === "static-sdk"))
       .sort(newer);
     const release = candidates.at(-1);

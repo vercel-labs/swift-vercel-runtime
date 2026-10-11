@@ -5,36 +5,43 @@ on:
     branches: [main]
     tags: ['*']
   pull_request:
+  # Daily, so a new Swift release (swift:latest) that breaks the build shows up without a push.
+  schedule:
+    - cron: '0 6 * * *'
 
 permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # Scheduled runs get their own group, so they neither cancel nor get cancelled by pushes to main.
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'schedule' }}
 
 jobs:
   test:
-    name: Test (Linux arm64)
+    name: Test (Linux arm64, Swift ${{ matrix.swift }})
     runs-on: ubuntu-24.04-arm
-    # The official image is only used for the Swift 6.4 toolchain. Everything runs directly in it.
-    container: swift:6.4
-    env:
-      STATIC_SDK_URL: https://download.swift.org/swift-6.4.0-release/static-sdk/swift-6.4.0-RELEASE/swift-6.4.0-RELEASE_static-linux-0.1.0.artifactbundle.tar.gz
-      STATIC_SDK_CHECKSUM: 47d2fd89eebfdf9eb4d536b6710414297f755c17926cdebc4742c08982b40a9e
+    strategy:
+      fail-fast: false
+      matrix:
+        # 6.4 is the tested setup in the README; latest is the newest Swift release.
+        swift: ['6.4', 'latest']
+    # The official image is only used for the Swift toolchain. Everything runs directly in it.
+    container: swift:${{ matrix.swift }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install the Static Linux SDK and Python (for the contract harness)
+      - name: Install Python (for the contract harness and the SDK lookup) and the Static Linux SDK
         run: |
-          apt-get update -qq && apt-get install -y -qq python3 > /dev/null
-          swift sdk install "$STATIC_SDK_URL" --checksum "$STATIC_SDK_CHECKSUM"
+          apt-get update -qq && apt-get install -y -qq python3 ca-certificates > /dev/null
+          swift --version
+          ./scripts/install-static-sdk.sh
 
       - name: Unit tests
         run: swift test
 
-      - name: vercel.json edits of swift package vercel init
-        run: ./scripts/test-vercel-json.sh
+      - name: Plugin logic (vercel.json edits, .swift-version, toolchain check)
+        run: ./scripts/test-plugin.sh
 
       - name: Build the examples with the vercel plugin and run the runtime contract tests
         # The binaries are fully static, so they run directly on this Linux host.

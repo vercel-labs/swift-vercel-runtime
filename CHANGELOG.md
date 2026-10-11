@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased
+
+- `swift package --disable-sandbox vercel init` also writes the local Swift version to
+  `.swift-version` (unless the file exists): the exact release for a swift.org toolchain (like
+  `6.4.0`), major.minor for Xcode's (like `6.4`), none for snapshots. Vercel builds then use the
+  Swift you develop with, and new Swift releases are opt-in. swiftly reads the same file.
+- `vercel-install-swift.sh`: `.swift-version` and `SWIFT_VERSION` match swift.org releases
+  however they are named, so `6.3.0` finds the release named `6.3`.
+- Toolchain check: no hardcoded Swift versions. For Apple's toolchain it suggests
+  `swiftly install`/`swiftly use` with its major.minor version (or `latest`); for a missing or
+  mismatched Static Linux SDK it points to swift.org's `swift sdk install` command instead of
+  guessing a URL. An SDK named without a patch version (like `swift-6.3-RELEASE_static-linux-0.1.0`)
+  now matches its toolchain.
+- CI tests Swift 6.4 and the latest Swift release, also daily, and installs the matching Static
+  Linux SDK with the new `scripts/install-static-sdk.sh`.
+- `scripts/test-plugin.sh` (replacing `scripts/test-vercel-json.sh`) tests all of the plugin's
+  PackagePlugin-free logic, with the tests in `scripts/plugin-tests`.
+
 ## 0.5.0
 
 New optional products for Vercel features, each its own library so apps only link what they use.

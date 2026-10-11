@@ -64,6 +64,10 @@ swift sdk install https://download.swift.org/swift-6.4.0-release/static-sdk/swif
 `swift sdk list` should show `swift-6.4.0-RELEASE_static-linux-0.1.0`. For other Swift versions, use
 the command under "Swift SDK for Static Linux" on [swift.org/install](https://www.swift.org/install/macos/).
 
+Swift 6.4.0 is the tested setup, but newer Swift releases work too: install the toolchain with
+swiftly and the Static Linux SDK for the same release from swift.org. The SDK must match the
+toolchain exactly; the plugin checks this before building.
+
 ### 3. Install the Vercel CLI
 
 ```sh
@@ -140,7 +144,7 @@ setup before compiling.
 ## Deploy from Git
 
 Vercel can also build the app itself on every push, with no Swift on your machine. Run this once
-in the package and commit `vercel.json`:
+in the package and commit `vercel.json` and `.swift-version`:
 
 ```sh
 swift package --disable-sandbox vercel init
@@ -158,6 +162,13 @@ rest of the file stays exactly as it was:
 ```
 
 Build options given to `init` (such as `--product` or `--memory`) are added to the Build Command.
+
+`init` also writes your Swift version to `.swift-version` next to `Package.swift`, unless the file
+exists: the exact release for a swift.org toolchain (like `6.4.0`), or the major and minor version
+for Xcode's (like `6.4`, meaning the latest 6.4.x). Snapshot toolchains get none. Commit it, so
+Vercel builds with the Swift you develop with, builds are reproducible, and upgrading Swift is a
+deliberate change to that file. swiftly reads the same file, so it also picks the toolchain
+locally.
 Then connect the repository to a Vercel project and leave its Framework Preset on "Other" (if
 `Package.swift` is not at the repository root, set the project's Root Directory to its folder).
 
@@ -171,8 +182,10 @@ toolchain's signature and the SDK's checksum. It keeps both in Vercel's build ca
 - Later builds restore Swift and `.build` from the cache in a few seconds and compile
   incrementally (about a minute in total for the examples).
 
-The toolchain is the latest Swift release, or the version in `SWIFT_VERSION` (an environment
-variable) or a `.swift-version` file next to `Package.swift`, like `6.4.0` or `6.4`.
+The toolchain is the version in `SWIFT_VERSION` (an environment variable) or `.swift-version`, like
+`6.4.0` or `6.4`. Without either, Vercel builds use the latest Swift release, so a new release
+changes the toolchain without notice. The build cache is per Swift version, so the first build
+with a new version is a cold one.
 
 The cache is per branch, and starts from the production branch's cache. Vercel drops a cache
 larger than 1.5 GB compressed (more on larger build machines). Swift takes about 700 MB of that
@@ -631,13 +644,15 @@ work done (or it is cancelled by `approaching-timeout`). Apps that never connect
 
 ```sh
 swift test                  # unit tests, including the proxy against a real NIO server
+scripts/test-plugin.sh      # the plugin's vercel.json edits, .swift-version and toolchain check
 scripts/test-linux.sh       # build every example with the plugin and run the contract
                             # tests against the Linux binaries
 ```
 
 The binaries are fully static, so on Linux `test-linux.sh` runs them directly; on macOS it runs
-them in an `amazonlinux:2023` container (Docker). CI runs both commands on a Linux arm64 runner
-(`.github/workflows/ci.yml`).
+them in an `amazonlinux:2023` container (Docker). CI runs all three on a Linux arm64 runner
+(`.github/workflows/ci.yml`) with Swift 6.4 and the latest Swift release, on every push and daily;
+`scripts/install-static-sdk.sh` installs the Static Linux SDK matching the toolchain there.
 
 `scripts/fake-runtime.py` emulates Vercel's runtime: it spawns the function's handler the same way,
 decodes messages with the same strict schema, sends `approaching-timeout`, and checks ping handling,
