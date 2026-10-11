@@ -12,7 +12,7 @@ let package = Package(
         .executable(name: "NIOApp", targets: ["App"]),
     ],
     dependencies: [
-        // In your app: .package(url: "https://github.com/vercel-labs/swift-vercel-runtime.git", from: "0.4.0")
+        // In your app: .package(url: "https://github.com/vercel-labs/swift-vercel-runtime.git", from: "0.5.0")
         .package(name: "swift-vercel-runtime", path: "../.."),
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.100.0"),
     ],

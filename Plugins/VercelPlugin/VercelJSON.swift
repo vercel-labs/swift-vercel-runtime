@@ -11,7 +11,7 @@ enum VercelJSON {
     ///
     /// Bump it together with `VercelLibrary.version` in `Sources/VercelHTTP/VercelLibrary.swift`:
     /// the plugin can't import package targets, so the two copies must be kept in sync by hand.
-    static let release = "0.4.0"
+    static let release = "0.5.0"
 
     /// Install Command for Git deployments: installs Swift in Vercel's build cache.
     static let installCommand =

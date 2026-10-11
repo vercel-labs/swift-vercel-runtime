@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.5.0
 
 New optional products for Vercel features, each its own library so apps only link what they use.
 See "Optional Vercel features" in the README.

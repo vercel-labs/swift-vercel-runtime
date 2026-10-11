@@ -4,5 +4,5 @@ package enum VercelLibrary {
     ///
     /// Bump it together with `VercelJSON.release` in `Plugins/VercelPlugin/VercelJSON.swift` at
     /// every release: the plugin can't import package targets, so it keeps its own copy.
-    package static let version = "0.4.0"
+    package static let version = "0.5.0"
 }
