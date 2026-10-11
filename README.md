@@ -135,9 +135,16 @@ setup before compiling.
 
 ## Deploy from Git
 
-Vercel can also build the app itself on every push, with no Swift on your machine. Connect the
-repository to the project, then add the install and build commands to `vercel.json` next to
-`Package.swift`:
+Vercel can also build the app itself on every push, with no Swift on your machine. Run this once
+in the package and commit `vercel.json`:
+
+```sh
+swift package --disable-sandbox vercel init
+```
+
+It sets the project's Install and Build Commands in `vercel.json` next to `Package.swift`,
+creating the file if needed. In an existing `vercel.json` only those two settings change; the
+rest of the file stays exactly as it was:
 
 ```json
 {
@@ -146,8 +153,9 @@ repository to the project, then add the install and build commands to `vercel.js
 }
 ```
 
-Leave the project's Framework Preset on "Other". Add build options (such as `--product`) to the
-build command.
+Build options given to `init` (such as `--product` or `--memory`) are added to the Build Command.
+Then connect the repository to a Vercel project and leave its Framework Preset on "Other" (if
+`Package.swift` is not at the repository root, set the project's Root Directory to its folder).
 
 [`vercel-install-swift.sh`](scripts/vercel-install-swift.sh) installs the swift.org toolchain for
 Amazon Linux 2023 (Vercel's build image) and the matching Static Linux SDK, after checking the

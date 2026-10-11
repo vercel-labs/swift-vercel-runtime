@@ -33,6 +33,9 @@ jobs:
       - name: Unit tests
         run: swift test
 
+      - name: vercel.json edits of swift package vercel init
+        run: ./scripts/test-vercel-json.sh
+
       - name: Build the examples with the vercel plugin and run the runtime contract tests
         # The binaries are fully static, so they run directly on this Linux host.
         run: ./scripts/test-linux.sh

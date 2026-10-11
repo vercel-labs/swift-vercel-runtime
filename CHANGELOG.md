@@ -6,6 +6,9 @@
   the swift.org toolchain and Static Linux SDK in Vercel's build image and keeps them (and the
   package's `.build`) in Vercel's build cache, so Vercel can run `swift package vercel` on every
   push. See "Deploy from Git" in the README.
+- `swift package --disable-sandbox vercel init [build options]` sets up Git deployments: it sets
+  `installCommand` and `buildCommand` in `vercel.json`, creating the file if needed. In an
+  existing `vercel.json` nothing else changes, not even formatting or key order.
 - `swift package vercel --swift-sdks-path <path>` (or `SWIFT_VERCEL_SDKS_PATH`) builds with SDKs
   from another directory.
 - `vercel.json` build settings (`installCommand`, `buildCommand`, ...) no longer print an
