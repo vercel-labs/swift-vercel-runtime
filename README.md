@@ -154,17 +154,19 @@ Amazon Linux 2023 (Vercel's build image) and the matching Static Linux SDK, afte
 toolchain's signature and the SDK's checksum. It keeps both in Vercel's build cache
 (`.vercel/cache` at the repository root), along with the package's `.build`:
 
-- The first build of a project downloads about 1.4 GB, which adds about two minutes.
-- Later builds restore Swift from the cache in about a second and compile incrementally.
+- The first build of a project downloads about 1.4 GB, which adds about a minute, and compiles
+  everything (3 to 6 minutes for the Hummingbird and Vapor examples on a standard build machine).
+- Later builds restore Swift and `.build` from the cache in a few seconds and compile
+  incrementally (about a minute in total for the examples).
 
 The toolchain is the latest Swift release, or the version in `SWIFT_VERSION` (an environment
 variable) or a `.swift-version` file next to `Package.swift`, like `6.4.0` or `6.4`.
 
 The cache is per branch, and starts from the production branch's cache. Vercel drops a cache
-larger than 1.5 GB compressed (more on larger build machines). Swift takes about 700 MB of that,
-so the script stops caching `.build` when it grows past 2000 MB on disk; set
-`SWIFT_VERCEL_MAX_BUILD_CACHE_MB` to change the limit. "Redeploy" without the build cache starts
-from scratch.
+larger than 1.5 GB compressed (more on larger build machines). Swift takes about 700 MB of that
+and the examples' `.build` 250 to 350 MB, so the script stops caching `.build` when it grows past
+2000 MB on disk; set `SWIFT_VERCEL_MAX_BUILD_CACHE_MB` to change the limit. A redeploy without
+the build cache (the default for `vercel redeploy`) starts from scratch.
 
 ## Vapor
 
