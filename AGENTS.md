@@ -90,10 +90,12 @@ double as the contract harness's test apps. `scripts/` has the test tooling and 
 
 ### Plugin
 - Plugin sources can't be imported by test targets. Keep logic in PackagePlugin-free files
-  (`VercelJSON.swift`, `ToolchainCheck.swift`, `SwiftVersionFile.swift`) and test it with
-  `scripts/test-plugin.sh`.
+  (`VercelJSON.swift`, `ToolchainCheck.swift`, `SwiftVersionFile.swift`, `GitIgnore.swift`) and
+  test it with `scripts/test-plugin.sh`.
 - `vercel init` edits `vercel.json` by splicing text: only `installCommand`/`buildCommand` change,
-  everything else stays byte-for-byte. It writes `.swift-version` only if missing.
+  everything else stays byte-for-byte. It writes `.swift-version` only if missing, and appends
+  `.vercel` to `.gitignore` only if `git check-ignore` (with global excludes disabled) says it
+  isn't ignored yet.
 - Inside `vercel build` (`VERCEL=1`), the plugin must not copy `crons` into `config.json`: Vercel
   adds them from `vercel.json` and rejects duplicates.
 

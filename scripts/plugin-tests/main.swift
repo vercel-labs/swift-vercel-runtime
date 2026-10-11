@@ -6,6 +6,7 @@ import Foundation
 let groups: [(name: String, run: () -> Int)] = [
     ("VercelJSON", runVercelJSONTests),
     ("ToolchainCheck and SwiftVersionFile", runToolchainCheckTests),
+    ("GitIgnore", runGitIgnoreTests),
 ]
 var failures = 0
 for group in groups {

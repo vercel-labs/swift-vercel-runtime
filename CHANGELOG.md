@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- `swift package --disable-sandbox vercel init` adds `.vercel` to `.gitignore` (creating it if
+  needed) unless Git already ignores it, including through a parent directory's `.gitignore`.
+  The build writes `.vercel/output` there. A `.vercel` ignored only by your global Git excludes
+  file still gets added, since it wouldn't be ignored in other clones.
+
 ## 0.6.0
 
 - `swift package --disable-sandbox vercel init` also writes the local Swift version to

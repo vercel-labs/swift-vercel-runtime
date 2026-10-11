@@ -144,7 +144,7 @@ setup before compiling.
 ## Deploy from Git
 
 Vercel can also build the app itself on every push, with no Swift on your machine. Run this once
-in the package and commit `vercel.json` and `.swift-version`:
+in the package and commit the files it writes (`vercel.json`, `.swift-version` and `.gitignore`):
 
 ```sh
 swift package --disable-sandbox vercel init
@@ -169,6 +169,10 @@ for Xcode's (like `6.4`, meaning the latest 6.4.x). Snapshot toolchains get none
 Vercel builds with the Swift you develop with, builds are reproducible, and upgrading Swift is a
 deliberate change to that file. swiftly reads the same file, so it also picks the toolchain
 locally.
+
+It also adds `.vercel` to `.gitignore` (creating it if needed) unless Git already ignores it,
+including through a parent directory's `.gitignore`: the build writes `.vercel/output` there.
+
 Then connect the repository to a Vercel project and leave its Framework Preset on "Other" (if
 `Package.swift` is not at the repository root, set the project's Root Directory to its folder).
 
