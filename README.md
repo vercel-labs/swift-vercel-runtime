@@ -133,6 +133,39 @@ vercel deploy --prebuilt                 # preview deployment; add --prod for pr
 If the build stops with a toolchain or SDK error, follow its instructions: the plugin checks your
 setup before compiling.
 
+## Deploy from Git
+
+Vercel can also build the app itself on every push, with no Swift on your machine. Connect the
+repository to the project, then add the install and build commands to `vercel.json` next to
+`Package.swift`:
+
+```json
+{
+  "installCommand": "curl -fsSL https://raw.githubusercontent.com/vercel-labs/swift-vercel-runtime/main/scripts/vercel-install-swift.sh | bash",
+  "buildCommand": ".vercel/bin/swift package --disable-sandbox vercel"
+}
+```
+
+Leave the project's Framework Preset on "Other". Add build options (such as `--product`) to the
+build command.
+
+[`vercel-install-swift.sh`](scripts/vercel-install-swift.sh) installs the swift.org toolchain for
+Amazon Linux 2023 (Vercel's build image) and the matching Static Linux SDK, after checking the
+toolchain's signature and the SDK's checksum. It keeps both in Vercel's build cache
+(`.vercel/cache` at the repository root), along with the package's `.build`:
+
+- The first build of a project downloads about 1.4 GB, which adds about two minutes.
+- Later builds restore Swift from the cache in about a second and compile incrementally.
+
+The toolchain is the latest Swift release, or the version in `SWIFT_VERSION` (an environment
+variable) or a `.swift-version` file next to `Package.swift`, like `6.4.0` or `6.4`.
+
+The cache is per branch, and starts from the production branch's cache. Vercel drops a cache
+larger than 1.5 GB compressed (more on larger build machines). Swift takes about 700 MB of that,
+so the script stops caching `.build` when it grows past 2000 MB on disk; set
+`SWIFT_VERCEL_MAX_BUILD_CACHE_MB` to change the limit. "Redeploy" without the build cache starts
+from scratch.
+
 ## Vapor
 
 Same setup, with a plain Vapor 5 app (currently beta). Vapor reads `PORT` from the environment:
@@ -349,6 +382,7 @@ in swift-aws-lambda-runtime). Its build files go to `.build/vercel`.
 | `--product <name>` | the only executable | Executable product to deploy |
 | `--architecture <arch>` | `arm64` | `arm64` or `x86_64` |
 | `--swift-sdk <id>` | Static Linux SDK for the architecture | Any installed Swift SDK |
+| `--swift-sdks-path <path>` | `$SWIFT_VERCEL_SDKS_PATH`, then SwiftPM's | Directory with installed Swift SDKs |
 | `--configuration <cfg>` | `release` | `release` or `debug` |
 | `--output <path>` | `.vercel/output` | Build Output API directory |
 | `--static-dir <path>` | | Serve a directory (for example `Public`) from Vercel's CDN |
@@ -359,7 +393,7 @@ The output follows the [Build Output API](https://vercel.com/docs/build-output-a
 function (`functions/index.func`) with `"runtime": "executable"` whose handler, `executable`, is
 the bootstrap, with your app's binary next to it, plus a route that sends every path to it. SwiftPM resource bundles
 are copied next to the binaries, and `crons` are taken from `vercel.json` (other `vercel.json`
-settings are not applied to prebuilt deployments).
+settings, apart from the build settings Vercel applies itself, are not applied to the output).
 
 ## The bootstrap in detail
 

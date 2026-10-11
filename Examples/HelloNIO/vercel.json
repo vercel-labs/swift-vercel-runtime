@@ -1,3 +1,5 @@
 {
+  "installCommand": "bash ../../scripts/vercel-install-swift.sh",
+  "buildCommand": ".vercel/bin/swift package --disable-sandbox vercel",
   "crons": [{ "path": "/cron", "schedule": "0 5 * * *" }]
 }

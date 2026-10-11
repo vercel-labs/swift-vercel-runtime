@@ -22,6 +22,8 @@ struct VercelPlugin: CommandPlugin {
           --architecture <arch>    arm64 (default) or x86_64.
           --swift-sdk <id>         Swift SDK to build with. Defaults to the Static Linux SDK
                                    (aarch64-swift-linux-musl or x86_64-swift-linux-musl).
+          --swift-sdks-path <path> Directory with installed Swift SDKs. Defaults to
+                                   $SWIFT_VERCEL_SDKS_PATH, then SwiftPM's default.
           --configuration <cfg>    release (default) or debug.
           --output <path>          Build Output directory. Defaults to .vercel/output.
           --static-dir <path>      Directory to serve from Vercel's CDN (for example Public).
@@ -38,7 +40,8 @@ struct VercelPlugin: CommandPlugin {
         the PORT environment variable. Cron jobs are read from `crons` in vercel.json next to
         Package.swift.
 
-        Deploy the result with: vercel deploy --prebuilt
+        Deploy the result with `vercel deploy --prebuilt`, or let Vercel build it from Git with
+        scripts/vercel-install-swift.sh (see the README).
         """
 
     func performCommand(context: PluginContext, arguments: [String]) async throws {
@@ -52,6 +55,10 @@ struct VercelPlugin: CommandPlugin {
         let architecture = try Architecture(extractor.extractOption(named: "architecture").last ?? "arm64")
         let requestedSDK = extractor.extractOption(named: "swift-sdk").last
         let swiftSDK = requestedSDK ?? architecture.staticLinuxSDK
+        // The environment fallback is set by the .vercel/bin/swift wrapper that
+        // scripts/vercel-install-swift.sh writes for Git deployments.
+        let environment = ProcessInfo.processInfo.environment
+        let swiftSDKsPath = extractor.extractOption(named: "swift-sdks-path").last ?? environment["SWIFT_VERCEL_SDKS_PATH"]
         let configuration = extractor.extractOption(named: "configuration").last ?? "release"
         let outputPath = extractor.extractOption(named: "output").last ?? ".vercel/output"
         let staticDirectory = extractor.extractOption(named: "static-dir").last
@@ -77,12 +84,19 @@ struct VercelPlugin: CommandPlugin {
         let crons = try readCrons(in: packageDirectory)
         let swift = try context.tool(named: "swift").url
         let scratchPath = packageDirectory.appending(path: ".build/vercel")
+        // SwiftPM reads SDKs from ~/.swiftpm/swift-sdks by default, and finds the home directory from
+        // the user database rather than $HOME, so a cached SDK has to be passed explicitly.
+        let sdksArguments = swiftSDKsPath.map {
+            ["--swift-sdks-path", URL(fileURLWithPath: $0, relativeTo: packageDirectory).standardizedFileURL.path()]
+        } ?? []
 
         // 0. Catch toolchain/SDK mismatches up front instead of after a minute of compiler errors.
         if swiftSDK.hasSuffix("-swift-linux-musl") {
             let versionOutput = try run(swift, ["--version"], in: packageDirectory, captureOutput: true)
             // An explicitly chosen SDK may be a custom one, so only the default is checked by name.
-            let sdkList = requestedSDK == nil ? try run(swift, ["sdk", "list"], in: packageDirectory, captureOutput: true) : nil
+            let sdkList = requestedSDK == nil
+                ? try run(swift, ["sdk", "list"] + sdksArguments, in: packageDirectory, captureOutput: true)
+                : nil
             if let problem = ToolchainCheck.problem(swiftVersionOutput: versionOutput, sdkListOutput: sdkList) {
                 throw PluginError.toolchain(problem)
             }
@@ -98,7 +112,7 @@ struct VercelPlugin: CommandPlugin {
             "--configuration", configuration,
             "--swift-sdk", swiftSDK,
             "--scratch-path", scratchPath.path(),
-        ]
+        ] + sdksArguments
         let binPath: URL
         do {
             for name in [product.name, Self.bootstrapProduct] {
@@ -190,11 +204,12 @@ struct VercelPlugin: CommandPlugin {
             ((try? FileManager.default.attributesOfItem(atPath: url.path())[.size] as? Int) ?? 0) / 1_000_000
         }
         print(
-            """
-            Wrote \(relativePath(output, to: packageDirectory)) (\(product.name): \(megabytes(executable)) MB, bootstrap: \(megabytes(bootstrap)) MB, \(architecture.rawValue))
-            Deploy with: vercel deploy --prebuilt
-            """
+            "Wrote \(relativePath(output, to: packageDirectory)) (\(product.name): \(megabytes(executable)) MB, bootstrap: \(megabytes(bootstrap)) MB, \(architecture.rawValue))"
         )
+        // In a Vercel build (a Git deployment), Vercel deploys the output itself.
+        if environment["VERCEL"] != "1" {
+            print("Deploy with: vercel deploy --prebuilt")
+        }
     }
 
     /// The bootstrap product in this package, and its file name in the function.
@@ -234,7 +249,9 @@ struct VercelPlugin: CommandPlugin {
             throw PluginError.invalidArgument("vercel.json must contain a JSON object")
         }
 
-        let ignored = config.keys.filter { $0 != "crons" && $0 != "$schema" }.sorted()
+        // Vercel applies its build settings itself before running the build command.
+        let buildSettings: Set = ["$schema", "crons", "installCommand", "buildCommand", "framework", "ignoreCommand", "git", "github"]
+        let ignored = config.keys.filter { !buildSettings.contains($0) }.sorted()
         if !ignored.isEmpty {
             print("note: swift package vercel only applies `crons` from vercel.json; ignoring \(ignored.joined(separator: ", "))")
         }
