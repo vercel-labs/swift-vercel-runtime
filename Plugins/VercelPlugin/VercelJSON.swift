@@ -6,9 +6,13 @@ import Foundation
 ///
 /// Kept free of `PackagePlugin` so the logic can be compiled and tested on its own.
 enum VercelJSON {
+    /// This package's release. The Install Command runs the install script from this release's tag,
+    /// so it always matches the plugin. Update it (and the README) with every release.
+    static let release = "0.4.0"
+
     /// Install Command for Git deployments: installs Swift in Vercel's build cache.
     static let installCommand =
-        "curl -fsSL https://raw.githubusercontent.com/vercel-labs/swift-vercel-runtime/main/scripts/vercel-install-swift.sh | bash"
+        "curl -fsSL https://raw.githubusercontent.com/vercel-labs/swift-vercel-runtime/\(release)/scripts/vercel-install-swift.sh | bash"
 
     /// Build Command for Git deployments, with optional `swift package vercel` build options.
     static func buildCommand(options: [String]) -> String {

@@ -88,7 +88,7 @@ let package = Package(
     dependencies: [
         .package(url: "https://github.com/hummingbird-project/hummingbird.git", from: "2.27.0"),
         // Provides `swift package vercel`. Nothing to import.
-        .package(url: "https://github.com/vercel-labs/swift-vercel-runtime.git", from: "0.3.0"),
+        .package(url: "https://github.com/vercel-labs/swift-vercel-runtime.git", from: "0.4.0"),
     ],
     targets: [
         .executableTarget(name: "hello", dependencies: [
@@ -148,7 +148,7 @@ rest of the file stays exactly as it was:
 
 ```json
 {
-  "installCommand": "curl -fsSL https://raw.githubusercontent.com/vercel-labs/swift-vercel-runtime/main/scripts/vercel-install-swift.sh | bash",
+  "installCommand": "curl -fsSL https://raw.githubusercontent.com/vercel-labs/swift-vercel-runtime/0.4.0/scripts/vercel-install-swift.sh | bash",
   "buildCommand": ".vercel/bin/swift package --disable-sandbox vercel"
 }
 ```
@@ -187,7 +187,7 @@ dependencies: [
     .package(url: "https://github.com/vapor/vapor.git", from: "5.0.0-beta.3"),
     // Needed until swift-http-server tags a release with its musl fix (see Known issues).
     .package(url: "https://github.com/swift-server/swift-http-server.git", revision: "09ee2e3682248532c43975b1af5938628efb7ba8"),
-    .package(url: "https://github.com/vercel-labs/swift-vercel-runtime.git", from: "0.3.0"),
+    .package(url: "https://github.com/vercel-labs/swift-vercel-runtime.git", from: "0.4.0"),
 ],
 targets: [
     .executableTarget(name: "App", dependencies: [

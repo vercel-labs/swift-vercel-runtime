@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.0
 
 - Git deployments: `scripts/vercel-install-swift.sh`, used as a project's Install Command, installs
   the swift.org toolchain and Static Linux SDK in Vercel's build image and keeps them (and the
