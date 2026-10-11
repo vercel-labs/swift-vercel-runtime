@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+- Git deployments: `scripts/vercel-install-swift.sh`, used as a project's Install Command, installs
+  the swift.org toolchain and Static Linux SDK in Vercel's build image and keeps them (and the
+  package's `.build`) in Vercel's build cache, so Vercel can run `swift package vercel` on every
+  push. See "Deploy from Git" in the README.
+- `swift package vercel --swift-sdks-path <path>` (or `SWIFT_VERCEL_SDKS_PATH`) builds with SDKs
+  from another directory.
+- `vercel.json` build settings (`installCommand`, `buildCommand`, ...) no longer print an
+  "ignoring" note.
+- Inside `vercel build` (`VERCEL=1`), `crons` are no longer copied into `config.json`: Vercel adds
+  them from `vercel.json` itself and rejected the duplicates.
+
 ## 0.3.0
 
 ### Breaking changes
