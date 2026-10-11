@@ -21,7 +21,9 @@ struct VercelPlugin: CommandPlugin {
           init                     Set up Git deployments: set the Install and Build Commands in
                                    vercel.json, creating it if needed. Nothing else in an existing
                                    vercel.json changes. Options given to init are added to the
-                                   Build Command.
+                                   Build Command. Also writes the local Swift version to
+                                   .swift-version (unless it exists), so Vercel builds with the
+                                   same Swift release.
 
         OPTIONS:
           --product <name>         Executable product to build. Defaults to the package's only
@@ -53,7 +55,7 @@ struct VercelPlugin: CommandPlugin {
 
     func performCommand(context: PluginContext, arguments: [String]) async throws {
         if arguments.first == "init" {
-            try initialize(package: context.package, buildOptions: Array(arguments.dropFirst()))
+            try initialize(context: context, buildOptions: Array(arguments.dropFirst()))
             return
         }
         let options = try BuildOptions(arguments)
@@ -92,7 +94,8 @@ struct VercelPlugin: CommandPlugin {
 
         // 0. Catch toolchain/SDK mismatches up front instead of after a minute of compiler errors.
         if swiftSDK.hasSuffix("-swift-linux-musl") {
-            let versionOutput = try run(swift, ["--version"], in: packageDirectory, captureOutput: true)
+            // Apple's toolchain prints "swift-driver version: ..." to stderr.
+            let versionOutput = try run(swift, ["--version"], in: packageDirectory, captureOutput: true, discardErrors: true)
             // An explicitly chosen SDK may be a custom one, so only the default is checked by name.
             let sdkList = requestedSDK == nil
                 ? try run(swift, ["sdk", "list"] + sdksArguments, in: packageDirectory, captureOutput: true)
@@ -217,8 +220,10 @@ struct VercelPlugin: CommandPlugin {
 
     /// `swift package vercel init [build options]`: sets the Install and Build Commands for Git
     /// deployments in vercel.json next to Package.swift. Creates the file if needed; in an existing
-    /// one, only those two settings change.
-    private func initialize(package: Package, buildOptions: [String]) throws {
+    /// one, only those two settings change. Then writes the local Swift version to `.swift-version`
+    /// unless that file exists (see `SwiftVersionFile`).
+    private func initialize(context: PluginContext, buildOptions: [String]) throws {
+        let package = context.package
         let options = try BuildOptions(buildOptions)
         if options.help {
             print(Self.usage)
@@ -261,15 +266,44 @@ struct VercelPlugin: CommandPlugin {
                 }
             }
         }
+
+        let versionFile = package.directoryURL.appending(path: SwiftVersionFile.name)
+        let existingVersion = FileManager.default.fileExists(atPath: versionFile.path())
+            ? try String(contentsOf: versionFile, encoding: .utf8)
+            : nil
+        let versionAction: SwiftVersionFile.Action
+        do {
+            // An existing file is kept without asking the toolchain.
+            let versionOutput = existingVersion == nil
+                ? try run(
+                    context.tool(named: "swift").url, ["--version"], in: package.directoryURL,
+                    captureOutput: true, discardErrors: true
+                )
+                : ""
+            versionAction = SwiftVersionFile.action(existing: existingVersion, swiftVersionOutput: versionOutput)
+        } catch {
+            versionAction = .skip(reason: "could not run `swift --version` (\(error))")
+        }
+        var pinned = true
+        switch versionAction {
+        case .write(let version): try Data((version + "\n").utf8).write(to: versionFile)
+        case .keep: break
+        case .skip: pinned = false
+        }
+        print(SwiftVersionFile.message(for: versionAction))
+
         print(
             """
 
-            Commit vercel.json and push: Vercel installs Swift (cached after the first build) and runs
-            `swift package vercel` on every deployment. For a new project, import the repository at
-            https://vercel.com/new with the Framework Preset "Other", and if Package.swift is not at
-            the repository root, set the Root Directory to its folder.
+            Commit \(pinned ? "vercel.json and .swift-version" : "vercel.json") and push: Vercel installs Swift (cached after the
+            first build) and runs `swift package vercel` on every deployment. For a new project, import
+            the repository at https://vercel.com/new with the Framework Preset "Other", and if
+            Package.swift is not at the repository root, set the Root Directory to its folder.
             """
         )
+        if pinned {
+            print("To move to a newer Swift release later, change .swift-version.")
+        }
     }
 
     /// The bootstrap product in this package, and its file name in the function.
@@ -382,7 +416,13 @@ struct VercelPlugin: CommandPlugin {
     }
 
     @discardableResult
-    private func run(_ executable: URL, _ arguments: [String], in directory: URL, captureOutput: Bool = false) throws -> String {
+    private func run(
+        _ executable: URL,
+        _ arguments: [String],
+        in directory: URL,
+        captureOutput: Bool = false,
+        discardErrors: Bool = false
+    ) throws -> String {
         let process = Process()
         process.executableURL = executable
         process.arguments = arguments
@@ -391,6 +431,9 @@ struct VercelPlugin: CommandPlugin {
         let pipe = Pipe()
         if captureOutput {
             process.standardOutput = pipe
+        }
+        if discardErrors {
+            process.standardError = FileHandle.nullDevice
         }
         try process.run()
         let output = captureOutput ? pipe.fileHandleForReading.readDataToEndOfFile() : Data()
