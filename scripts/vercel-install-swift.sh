@@ -98,6 +98,8 @@ if [ -d "$CACHE_DIR" ]; then
   done
 fi
 mkdir -p "$VERSION_DIR"
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
 
 # 1. Toolchain
 if [ -x "$TOOLCHAIN/usr/bin/swift" ]; then
@@ -106,8 +108,6 @@ else
   START=$(date +%s)
   FILE="$TAG-$PLATFORM_DIR$ARCH_SUFFIX.tar.gz"
   URL="$DOWNLOADS/$PLATFORM_DIR$ARCH_SUFFIX/$TAG/$FILE"
-  TMP="$(mktemp -d)"
-  trap 'rm -rf "$TMP"' EXIT
   log "downloading $URL"
   curl -fsSL --retry 3 -o "$TMP/$FILE" "$URL"
   curl -fsSL --retry 3 -o "$TMP/$FILE.sig" "$URL.sig"
@@ -125,7 +125,7 @@ else
   rm -rf "$TOOLCHAIN.partial"
   mkdir -p "$TOOLCHAIN.partial"
   tar -xzf "$TMP/$FILE" -C "$TOOLCHAIN.partial" --strip-components=1
-  rm -rf "$TMP"
+  rm -f "$TMP/$FILE"
   # Halves the toolchain (and the build cache): debugger, IDE support, docs, formatter, Wasm
   # runtime, Embedded Swift and the host's static stdlib are not used to build a server.
   usr="$TOOLCHAIN.partial/usr"
@@ -144,9 +144,15 @@ if "$TOOLCHAIN/usr/bin/swift" sdk list --swift-sdks-path "$SDKS_PATH" 2>/dev/nul
 else
   START=$(date +%s)
   rm -rf "$SDKS_PATH"
-  "$TOOLCHAIN/usr/bin/swift" sdk install --swift-sdks-path "$SDKS_PATH" \
-    "$DOWNLOADS/static-sdk/$TAG/${SDK_ID}.artifactbundle.tar.gz" --checksum "$SDK_CHECKSUM" |
-    grep -v '% Downloading' || true
+  # Downloaded with curl: `swift sdk install <url>` can crash in URLSession on exit on Linux.
+  BUNDLE="$TMP/${SDK_ID}.artifactbundle.tar.gz"
+  log "downloading $DOWNLOADS/static-sdk/$TAG/${SDK_ID}.artifactbundle.tar.gz"
+  curl -fsSL --retry 3 -o "$BUNDLE" "$DOWNLOADS/static-sdk/$TAG/${SDK_ID}.artifactbundle.tar.gz"
+  echo "$SDK_CHECKSUM  $BUNDLE" | sha256sum --check --quiet ||
+    die "the Static Linux SDK's checksum does not match swift.org's"
+  "$TOOLCHAIN/usr/bin/swift" sdk install --swift-sdks-path "$SDKS_PATH" "$BUNDLE" > "$TMP/sdk.log" 2>&1 ||
+    die "installing the Static Linux SDK failed: $(cat "$TMP/sdk.log")"
+  rm -f "$BUNDLE"
   "$TOOLCHAIN/usr/bin/swift" sdk list --swift-sdks-path "$SDKS_PATH" | grep -qx "$SDK_ID" ||
     die "installing the Static Linux SDK $SDK_ID failed"
   log "installed the Static Linux SDK in $(seconds_since "$START")"
