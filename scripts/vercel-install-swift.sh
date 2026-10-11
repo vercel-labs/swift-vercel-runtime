@@ -8,13 +8,16 @@
 # Vercel saves <repository root>/.vercel/cache after every build and restores it before the next
 # one, so only a project's first build downloads Swift. Everything lives in
 # .vercel/cache/swift/<version>: the toolchain (without the debugger, SourceKit and other tools a
-# server build does not use), the SDK, and the build directory for incremental builds. Other
+# server build does not use), the SDK, and the package's .build for incremental builds. Other
 # versions are deleted to stay under the build cache size limit.
 #
-# The project's .build becomes a link to the cached build directory. The build command runs
-# .vercel/bin/swift, a wrapper this script writes into the project: it points
-# `swift package vercel` at the cached SDK, and drops the build directory from the cache if it
-# grows past SWIFT_VERCEL_MAX_BUILD_CACHE_MB.
+# The build command runs .vercel/bin/swift, a wrapper this script writes into the project. It
+# points `swift package vercel` at the cached SDK, and after a build saves .build to the cache
+# as a tar file, unless it is larger than SWIFT_VERCEL_MAX_BUILD_CACHE_MB.
+#
+# Vercel stores the cache as SquashFS, which keeps file times to the second. SwiftPM compares
+# them to the nanosecond and would rebuild everything, so .build is cached as a tar file (which
+# keeps them exactly), and the toolchain and SDK get whole-second times when installed.
 #
 # Environment:
 #   SWIFT_VERSION                    Swift release, like 6.4.0 or 6.4 (latest 6.4.x). Defaults to
@@ -28,9 +31,12 @@ die() {
   exit 1
 }
 seconds_since() { echo "$(($(date +%s) - $1))s"; }
+# Gives every file the same whole-second modification time, so it survives the build cache: the
+# compiler's module cache checks the toolchain's and SDK's files by modification time.
+whole_second_times() { find "$1" -exec touch -h -d "@$(date +%s)" {} +; }
 
 [ "$(uname -s)" = "Linux" ] || die "this installs Swift in Vercel's Linux build image. On your own machine, follow the README instead."
-for tool in curl tar gpg node; do
+for tool in curl tar zstd gpg node; do
   command -v "$tool" >/dev/null || die "'$tool' is required"
 done
 
@@ -82,7 +88,9 @@ read -r VERSION TAG PLATFORM_DIR SDK_VERSION SDK_CHECKSUM < <(
 VERSION_DIR="$CACHE_DIR/$VERSION"
 TOOLCHAIN="$VERSION_DIR/toolchain"
 SDKS_PATH="$VERSION_DIR/swift-sdks"
-BUILD_DIR="$VERSION_DIR/build"
+PROJECT_KEY="$(realpath --relative-to="$REPO_ROOT" "$PROJECT_DIR" | tr '/' '_')"
+[ "$PROJECT_KEY" = "." ] && PROJECT_KEY="root"
+BUILD_ARCHIVE="$VERSION_DIR/build-$PROJECT_KEY.tar.zst"
 SDK_ID="${TAG}_static-linux-${SDK_VERSION}"
 DOWNLOADS="https://download.swift.org/$(echo "$TAG" | tr '[:upper:]' '[:lower:]')"
 
@@ -133,6 +141,7 @@ else
     "$usr"/lib/liblldb* "$usr"/bin/lldb* "$usr"/lib/python3* \
     "$usr"/lib/libsourcekitdInProc.so "$usr"/lib/libSwiftSourceKit*Plugin.so "$usr"/bin/sourcekit-lsp \
     "$usr"/bin/clangd "$usr"/bin/docc "$usr"/share/docc "$usr"/bin/swift-format "$usr"/bin/wasmkit
+  whole_second_times "$TOOLCHAIN.partial"
   mv "$TOOLCHAIN.partial" "$TOOLCHAIN"
   log "installed the toolchain in $(seconds_since "$START")"
 fi
@@ -155,16 +164,29 @@ else
   rm -f "$BUNDLE"
   "$TOOLCHAIN/usr/bin/swift" sdk list --swift-sdks-path "$SDKS_PATH" | grep -qx "$SDK_ID" ||
     die "installing the Static Linux SDK $SDK_ID failed"
+  whole_second_times "$SDKS_PATH"
   log "installed the Static Linux SDK in $(seconds_since "$START")"
 fi
 
-# 3. The package's .build, in the cache: resolved dependencies, the compiled plugin and (in
-# .build/vercel) the plugin's incremental build. A fresh clone has no .build; leave a real one alone.
-mkdir -p "$BUILD_DIR"
-if [ -L "$PROJECT_DIR/.build" ] || [ ! -e "$PROJECT_DIR/.build" ]; then
-  ln -sfn "$BUILD_DIR" "$PROJECT_DIR/.build"
-else
-  log "note: $PROJECT_DIR/.build exists, so builds are not incremental"
+# 3. The package's .build from the previous build: resolved dependencies, the compiled plugin and
+# (in .build/vercel) the plugin's incremental build. A fresh clone has no .build.
+for entry in "$VERSION_DIR"/*; do
+  case "$entry" in
+    "$TOOLCHAIN" | "$SDKS_PATH" | "$BUILD_ARCHIVE") ;;
+    *) rm -rf "$entry" ;;
+  esac
+done
+if [ -e "$PROJECT_DIR/.build" ]; then
+  log "note: .build already exists, so it is not restored from the build cache"
+elif [ -f "$BUILD_ARCHIVE" ]; then
+  START=$(date +%s)
+  mkdir "$PROJECT_DIR/.build"
+  if zstd -dcq --long=31 "$BUILD_ARCHIVE" | tar -xf - -C "$PROJECT_DIR/.build"; then
+    log "restored .build from the build cache ($(du -sm "$PROJECT_DIR/.build" | cut -f1) MB) in $(seconds_since "$START")"
+  else
+    log "could not restore .build from the build cache; building from scratch"
+    rm -rf "$PROJECT_DIR/.build"
+  fi
 fi
 
 # 4. The wrapper the build command runs.
@@ -175,14 +197,26 @@ cat > "$PROJECT_DIR/.vercel/bin/swift" << EOF
 export SWIFT_VERCEL_SDKS_PATH='$SDKS_PATH'
 status=0
 '$TOOLCHAIN/usr/bin/swift' "\$@" || status=\$?
-# Over Vercel's build cache limit the whole cache is dropped, toolchain included, so give up the
-# build directory (incremental builds) first.
-limit="\${SWIFT_VERCEL_MAX_BUILD_CACHE_MB:-2000}"
-if [ -d '$BUILD_DIR' ]; then
-  size="\$(du -sm '$BUILD_DIR' | cut -f1)"
+build='$PROJECT_DIR/.build'
+if [ "\$status" -eq 0 ] && [ "\${1:-}" = package ] && [ -d "\$build" ]; then
+  # Over Vercel's build cache limit the whole cache is dropped, toolchain included, so give up
+  # incremental builds first.
+  limit="\${SWIFT_VERCEL_MAX_BUILD_CACHE_MB:-2000}"
+  size="\$(du -sm "\$build" | cut -f1)"
   if [ "\$size" -gt "\$limit" ]; then
-    echo "swift-vercel: not caching the \${size} MB build directory (over SWIFT_VERCEL_MAX_BUILD_CACHE_MB=\$limit)"
-    rm -rf '$BUILD_DIR'
+    echo "swift-vercel: not caching the \${size} MB .build (over SWIFT_VERCEL_MAX_BUILD_CACHE_MB=\$limit)"
+    rm -f '$BUILD_ARCHIVE'
+  else
+    # A POSIX tar keeps nanosecond file times, which the build cache's SquashFS would round.
+    # zstd's long window also compresses the identical dependency checkouts SwiftPM keeps twice.
+    set -o pipefail
+    if tar --format=posix -cf - -C "\$build" . | zstd -T0 -3 --long=31 -q -f -o '$BUILD_ARCHIVE.partial'; then
+      mv '$BUILD_ARCHIVE.partial' '$BUILD_ARCHIVE'
+      echo "swift-vercel: saved the \${size} MB .build to the build cache"
+    else
+      rm -f '$BUILD_ARCHIVE.partial'
+      echo "swift-vercel: could not save .build to the build cache"
+    fi
   fi
 fi
 exit \$status
